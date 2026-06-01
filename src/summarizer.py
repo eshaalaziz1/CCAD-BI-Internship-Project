@@ -9,22 +9,26 @@ from pathlib import Path
 
 import ollama
 
+from src.constants import (
+    CHAT_OPTIONS,
+    KEEP_ALIVE,
+    MAX_RETRIES,
+    MODEL,
+    PROMPT_VERSION,
+)
+
 logger = logging.getLogger(__name__)
-
-MODEL = "medgemma1.5"
-PROMPT_VERSION = "v1"
-TEMPERATURE = 0.2
-NUM_PREDICT = 700
-KEEP_ALIVE = "30m"
-MAX_RETRIES = 1
-
-CHAT_OPTIONS = {
-    "temperature": TEMPERATURE,
-    "num_predict": NUM_PREDICT,
-}
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PROMPT_PATH = PROJECT_ROOT / "prompts" / "tumor_board_summary.txt"
+
+__all__ = [
+    "MODEL",
+    "PROMPT_VERSION",
+    "check_ollama_reachable",
+    "summarize_patient",
+    "stream_summarize_patient",
+]
 
 
 def load_prompt_template() -> str:

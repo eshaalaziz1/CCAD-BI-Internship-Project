@@ -15,12 +15,8 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.summarizer import (  # noqa: E402
-    MODEL,
-    PROMPT_VERSION,
-    check_ollama_reachable,
-    summarize_patient,
-)
+from src.constants import MODEL, PROMPT_VERSION  # noqa: E402
+from src.summarizer import check_ollama_reachable, summarize_patient  # noqa: E402
 
 CSV_PATH = PROJECT_ROOT / "data" / "synthetic_patients" / "sample_patients.csv"
 OUTPUT_DIR = PROJECT_ROOT / "outputs"

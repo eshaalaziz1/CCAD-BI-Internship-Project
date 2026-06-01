@@ -12,9 +12,8 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from src.constants import MODEL, PROMPT_VERSION
 from src.summarizer import (
-    MODEL,
-    PROMPT_VERSION,
     check_ollama_reachable,
     stream_summarize_patient,
     summarize_patient,
