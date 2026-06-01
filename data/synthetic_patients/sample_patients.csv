@@ -1,0 +1,6 @@
+patient_id,age,sex,diagnosis,stage,ecog,biomarkers,prior_treatment,notes
+P001,62,F,Lung adenocarcinoma,IIIA,1,"EGFR negative; PD-L1 60%; ALK unknown","None yet","Pending surgical review after staging workup"
+P002,55,M,Rectal adenocarcinoma,IIIB,0,"MMR intact","None yet","MRI pelvis shows locally advanced disease; CEA elevated"
+P003,70,F,Breast invasive ductal carcinoma,IIA,1,"ER positive; PR positive; HER2 negative","Lumpectomy planned","Needs adjuvant therapy discussion"
+P004,66,M,Pancreatic adenocarcinoma,Borderline resectable,1,"CA19-9 elevated","None yet","Vascular involvement noted on CT"
+P005,48,F,Ovarian high-grade serous carcinoma,IIIC,1,"BRCA unknown","Diagnostic laparoscopy","Consider neoadjuvant chemotherapy vs primary debulking"
