@@ -143,9 +143,20 @@ def get_cached_summary(
     return summarize_patient(patient_data)
 
 
+def _summary_cache_key(patient_id: str, fingerprint: str, cache_bust: int) -> str:
+    return f"{patient_id}:{fingerprint}:{cache_bust}"
+
+
+def _mark_summary_warmed(cache_key: str) -> None:
+    warmed = set(st.session_state.get("summary_warmed_keys", set()))
+    warmed.add(cache_key)
+    st.session_state["summary_warmed_keys"] = warmed
+
+
 def load_summary(
     patient_id: str,
     patient_data: str,
+    fingerprint: str,
     cache_bust: int,
     *,
     force_refresh: bool,
@@ -154,18 +165,22 @@ def load_summary(
     Return (summary, from_cache, latency_sec).
     Cache hit: instant. Regenerate: stream. First generate: single Ollama call.
     """
+    cache_key = _summary_cache_key(patient_id, fingerprint, cache_bust)
+    warmed_keys = st.session_state.get("summary_warmed_keys", set())
+
     if force_refresh:
         start = time.perf_counter()
         summary = st.write_stream(stream_summarize_patient(patient_data))
         latency = time.perf_counter() - start
         get_cached_summary(patient_id, patient_data, cache_bust, precomputed=summary)
+        _mark_summary_warmed(cache_key)
         return summary, False, latency
 
-    info_before = get_cached_summary.cache_info()
+    from_cache = cache_key in warmed_keys
     summary = get_cached_summary(patient_id, patient_data, cache_bust)
-    if get_cached_summary.cache_info().hits > info_before.hits:
-        return summary, True, None
-    return summary, False, None
+    if not from_cache:
+        _mark_summary_warmed(cache_key)
+    return summary, from_cache, None
 
 
 def main() -> None:
@@ -239,6 +254,7 @@ def main() -> None:
         if clear_cache:
             st.session_state[bust_key] = st.session_state.get(bust_key, 0) + 1
             get_cached_summary.clear()
+            st.session_state["summary_warmed_keys"] = set()
             st.session_state.pop("summary", None)
             st.session_state.pop("summary_meta", None)
             st.rerun()
@@ -251,6 +267,7 @@ def main() -> None:
                 summary, from_cache, latency = load_summary(
                     patient_id,
                     patient_data,
+                    fingerprint,
                     st.session_state.get(bust_key, 0),
                     force_refresh=regenerate,
                 )
