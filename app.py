@@ -1,22 +1,38 @@
-"""Streamlit tumor board assistant — synthetic patients + local MedGemma via Ollama."""
+"""Tumor Board Assist — synthetic MDT workspace."""
 
 from __future__ import annotations
 
 import hashlib
 import logging
-import re
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-from src.constants import MODEL, PROMPT_VERSION
+from src.constants import MODEL
+from src.patients import (
+    PATIENT_COLUMNS,
+    add_custom_patient,
+    delete_custom_patient,
+    format_patient_data,
+    load_all_patients,
+    next_patient_id,
+    normalize_record,
+    patient_profile_label,
+)
 from src.summarizer import (
     check_ollama_reachable,
     stream_summarize_patient,
     summarize_patient,
+)
+from src.synthetic_generator import generate_synthetic_patient
+from src.ui_components import (
+    display_summary,
+    inject_styles,
+    render_footer,
+    render_profile_hero,
+    render_profile_sections,
 )
 
 logging.basicConfig(
@@ -24,109 +40,20 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-CSV_PATH = PROJECT_ROOT / "data" / "synthetic_patients" / "sample_patients.csv"
-
-SECTION_ORDER = [
-    "One-line case summary",
-    "Key clinical facts",
-    "Missing or unclear information",
-    "MDT discussion questions",
-    "Treatment considerations",
-]
-
-DISPLAY_COLUMNS = [
-    "patient_id",
-    "age",
-    "sex",
-    "diagnosis",
-    "stage",
-    "ecog",
-    "biomarkers",
-    "imaging",
-    "pathology",
-    "comorbidities",
-    "medications",
-    "pending_tests",
-    "prior_treatment",
-    "notes",
-]
-
-
-def load_patients() -> pd.DataFrame:
-    return pd.read_csv(CSV_PATH)
-
-
-def format_patient_data(row: pd.Series) -> str:
-    return "\n".join(f"{col}: {row[col]}" for col in row.index)
-
 
 def record_fingerprint(patient_data: str) -> str:
     return hashlib.sha256(patient_data.encode("utf-8")).hexdigest()[:16]
 
 
-def parse_summary_sections(text: str) -> dict[str, str]:
-    sections: dict[str, str] = {}
-    for block in re.split(r"\n(?=\d+\.\s+)", text.strip()):
-        match = re.match(r"^\d+\.\s+([^\n]+)\n?(.*)", block.strip(), re.DOTALL)
-        if match:
-            sections[match.group(1).strip()] = match.group(2).strip()
-    return sections
-
-
-def display_summary(text: str) -> None:
-    sections = parse_summary_sections(text)
-    if not sections:
-        st.markdown(text)
-        return
-
-    for title in SECTION_ORDER:
-        content = sections.get(title)
-        if content:
-            st.subheader(title)
-            st.markdown(content)
-
-    for title in sections:
-        if title not in SECTION_ORDER:
-            st.subheader(title)
-            st.markdown(sections[title])
-
-
-def summary_to_markdown(patient_id: str, summary: str) -> str:
-    lines = [
-        f"# Tumor board summary — {patient_id}",
-        f"Model: {MODEL} | Prompt: {PROMPT_VERSION}",
-        f"Generated: {datetime.now(timezone.utc).isoformat()}",
-        "",
-        summary,
-    ]
-    return "\n".join(lines)
-
-
-def render_patient_record(row: pd.Series) -> None:
-    structured = row.to_dict()
-    keys = [k for k in DISPLAY_COLUMNS if k in structured]
-    mid = (len(keys) + 1) // 2
-    col_left, col_right = st.columns(2)
-    with col_left:
-        for key in keys[:mid]:
-            label = key.replace("_", " ").title()
-            value = structured[key]
-            if pd.isna(value) or value == "":
-                value = "—"
-            st.markdown(f"**{label}:** {value}")
-    with col_right:
-        for key in keys[mid:]:
-            label = key.replace("_", " ").title()
-            value = structured[key]
-            if pd.isna(value) or value == "":
-                value = "—"
-            st.markdown(f"**{label}:** {value}")
+def bump_patient_data_version() -> None:
+    st.session_state["patients_version"] = (
+        st.session_state.get("patients_version", 0) + 1
+    )
 
 
 @st.cache_data
-def get_patients_df() -> pd.DataFrame:
-    return load_patients()
+def get_patients_df(version: int) -> pd.DataFrame:
+    return load_all_patients()
 
 
 @st.cache_data(show_spinner=False)
@@ -136,7 +63,6 @@ def get_cached_summary(
     cache_bust: int,
     precomputed: str | None = None,
 ) -> str:
-    """Cache summaries by patient id, record content, and bust token."""
     if precomputed is not None:
         return precomputed
     return summarize_patient(patient_data)
@@ -160,10 +86,6 @@ def load_summary(
     *,
     force_refresh: bool,
 ) -> tuple[str, bool, float | None]:
-    """
-    Return (summary, from_cache, latency_sec).
-    Cache hit: instant. Regenerate: stream. First generate: single Ollama call.
-    """
     cache_key = _summary_cache_key(patient_id, fingerprint, cache_bust)
     warmed_keys = st.session_state.get("summary_warmed_keys", set())
 
@@ -182,73 +104,90 @@ def load_summary(
     return summary, from_cache, None
 
 
-def main() -> None:
-    st.set_page_config(page_title="Tumor Board AI", layout="wide")
-    st.title("Tumor Board AI")
-
-    with st.sidebar:
-        st.caption("Build")
-        st.markdown(f"- Model: `{MODEL}`")
-        st.markdown(f"- Prompt: `{PROMPT_VERSION}`")
-        st.markdown("- Data: synthetic only")
-
-    st.caption(
-        "Synthetic oncology cases only. Summaries use local Ollama and must not "
-        "invent clinical facts beyond the record."
+def summary_to_markdown(patient_id: str, summary: str) -> str:
+    return "\n".join(
+        [
+            f"# MDT summary — {patient_id}",
+            f"Generated: {datetime.now(timezone.utc).isoformat()}",
+            "",
+            summary,
+        ]
     )
 
-    ollama_ok = check_ollama_reachable()
-    if not ollama_ok:
-        st.warning(
-            "Ollama is not reachable. Start it with `ollama serve`, ensure "
-            f"`ollama pull {MODEL}` is done, then refresh this page."
-        )
 
-    with st.expander("Running on Apple Silicon (M1 Mac)"):
-        st.markdown(
-            "MedGemma 1.5 4B is appropriate for an M1 MacBook Air: Ollama uses "
-            "Apple GPU/Neural Engine and roughly **3–5 GB** of unified memory while "
-            "the model is loaded. Close other heavy apps during generation."
-        )
+def get_selected_row(df: pd.DataFrame) -> pd.Series:
+    labels = [patient_profile_label(row) for _, row in df.iterrows()]
+    if "selected_patient_label" not in st.session_state:
+        st.session_state.selected_patient_label = labels[0]
+    if st.session_state.selected_patient_label not in labels:
+        st.session_state.selected_patient_label = labels[0]
+    idx = labels.index(st.session_state.selected_patient_label)
+    return df.iloc[idx]
 
-    df = get_patients_df()
-    labels = [
-        f"{row['patient_id']} — {row['diagnosis']} (stage {row['stage']})"
-        for _, row in df.iterrows()
-    ]
-    choice = st.selectbox("Select patient", labels, index=0)
-    row = df.iloc[labels.index(choice)]
+
+def sidebar_patient_picker(df: pd.DataFrame) -> pd.Series:
+    st.markdown("##### Patient panel")
+    search = st.text_input("Search", placeholder="ID, diagnosis, stage…", label_visibility="collapsed")
+    filtered = df.copy()
+    if search.strip():
+        mask = filtered.apply(
+            lambda r: search.lower()
+            in " ".join(str(r[c]) for c in ["patient_id", "diagnosis", "stage"]).lower(),
+            axis=1,
+        )
+        filtered = filtered[mask]
+
+    if filtered.empty:
+        st.caption("No patients match your search.")
+        return df.iloc[0]
+
+    labels = [patient_profile_label(row) for _, row in filtered.iterrows()]
+    choice = st.radio(
+        "Patients",
+        labels,
+        label_visibility="collapsed",
+        key="sidebar_patient_radio",
+    )
+    st.session_state.selected_patient_label = choice
+    return filtered.iloc[labels.index(choice)]
+
+
+def page_patient_chart(df: pd.DataFrame, ollama_ok: bool) -> None:
+    row = get_selected_row(df)
     patient_id = str(row["patient_id"])
     patient_data = format_patient_data(row)
     fingerprint = record_fingerprint(patient_data)
-
     bust_key = f"cache_bust_{patient_id}"
 
-    col_record, col_summary = st.columns(2, gap="large")
+    render_profile_hero(row)
 
-    with col_record:
-        st.subheader("Patient record")
-        render_patient_record(row)
+    tab_profile, tab_summary = st.tabs(["Patient profile", "MDT summary"])
 
-    with col_summary:
-        st.subheader("Tumor board summary")
+    with tab_profile:
+        render_profile_sections(row, list(row.index))
+        if str(row.get("source", "")) in ("custom", "synthetic"):
+            if st.button("Remove this patient", type="secondary"):
+                try:
+                    delete_custom_patient(patient_id)
+                    bump_patient_data_version()
+                    st.session_state.pop("summary", None)
+                    st.session_state.pop("summary_meta", None)
+                    st.success(f"Removed {patient_id}.")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
 
-        btn_col1, btn_col2, btn_col3 = st.columns(3)
-        with btn_col1:
-            generate = st.button(
-                "Generate",
-                type="primary",
-                disabled=not ollama_ok,
-                use_container_width=True,
-            )
-        with btn_col2:
-            regenerate = st.button(
-                "Regenerate",
-                disabled=not ollama_ok,
-                use_container_width=True,
-            )
-        with btn_col3:
-            clear_cache = st.button("Clear cache", use_container_width=True)
+    with tab_summary:
+        if not ollama_ok:
+            st.warning("AI summaries unavailable — start Ollama locally to enable generation.")
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            generate = st.button("Generate MDT brief", type="primary", disabled=not ollama_ok)
+        with c2:
+            regenerate = st.button("Regenerate", disabled=not ollama_ok)
+        with c3:
+            clear_cache = st.button("Reset cache")
 
         if clear_cache:
             st.session_state[bust_key] = st.session_state.get(bust_key, 0) + 1
@@ -270,50 +209,228 @@ def main() -> None:
                     st.session_state.get(bust_key, 0),
                     force_refresh=regenerate,
                 )
-            except Exception as exc:
-                st.error(
-                    "Could not reach Ollama. Ensure `ollama serve` is running and "
-                    f"`ollama pull {MODEL}` is completed.\n\nDetails: {exc}"
-                )
-            else:
                 st.session_state["summary"] = summary
                 st.session_state["summary_meta"] = {
                     "patient_id": patient_id,
                     "fingerprint": fingerprint,
                     "from_cache": from_cache,
                     "latency_sec": latency,
-                    "generated_at": datetime.now(timezone.utc).isoformat(),
                 }
+            except Exception as exc:
+                st.error(f"Summary generation failed: {exc}")
 
         meta = st.session_state.get("summary_meta", {})
         summary = st.session_state.get("summary")
-        show_summary = (
+        if (
             summary
             and meta.get("patient_id") == patient_id
             and meta.get("fingerprint") == fingerprint
-        )
-
-        if show_summary:
+        ):
             if meta.get("from_cache"):
-                st.info("Loaded from cache (same patient record).")
-            elif meta.get("latency_sec") is not None:
-                st.caption(
-                    f"Generated in {meta['latency_sec']:.1f}s · {meta.get('generated_at', '')}"
-                )
-
+                st.caption("Cached brief for this record.")
+            elif meta.get("latency_sec"):
+                st.caption(f"Generated in {meta['latency_sec']:.1f}s")
             display_summary(summary)
-
             st.download_button(
-                "Download Markdown",
+                "Export brief (Markdown)",
                 data=summary_to_markdown(patient_id, summary),
-                file_name=f"{patient_id}_tumor_board_summary.md",
+                file_name=f"{patient_id}_mdt_brief.md",
                 mime="text/markdown",
-                use_container_width=True,
             )
         else:
-            st.markdown(
-                "_Select a patient and click **Generate** to create an MDT summary._"
+            st.info("Generate an MDT brief from this patient's profile and clinical text.")
+
+
+def page_add_patient(df: pd.DataFrame) -> None:
+    st.subheader("Register patient")
+    st.caption("Add a synthetic case manually. Imaging upload will be supported in a future release.")
+
+    suggested_id = next_patient_id(df)
+    with st.form("add_patient_form", clear_on_submit=False):
+        st.markdown("##### Identity & disease")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            patient_id = st.text_input("Patient ID", value=suggested_id)
+        with c2:
+            age = st.number_input("Age", min_value=0, max_value=120, value=60)
+        with c3:
+            sex = st.selectbox("Sex", ["F", "M", "U"])
+        with c4:
+            ecog = st.selectbox("ECOG", [0, 1, 2, 3, 4], index=1)
+
+        c5, c6 = st.columns(2)
+        with c5:
+            diagnosis = st.text_input("Diagnosis", placeholder="e.g. Lung adenocarcinoma")
+        with c6:
+            stage = st.text_input("Stage", placeholder="e.g. IIIA")
+
+        st.markdown("##### Structured clinical data")
+        biomarkers = st.text_area("Biomarkers", height=68)
+        imaging = st.text_area("Imaging", height=68, placeholder="Future: link to imaging studies")
+        pathology = st.text_area("Pathology", height=68)
+        pending_tests = st.text_area("Pending tests", height=68)
+        comorbidities = st.text_input("Comorbidities")
+        medications = st.text_input("Medications")
+        prior_treatment = st.text_input("Prior treatment")
+        notes = st.text_area("Care team notes", height=80)
+
+        st.markdown("##### Free-text intake")
+        intake_text = st.text_area(
+            "Clinical narrative",
+            height=140,
+            placeholder="Paste or type history, symptoms, referral reason, open questions…",
+        )
+
+        submitted = st.form_submit_button("Save patient", type="primary")
+
+    if submitted:
+        if not diagnosis.strip() or not stage.strip():
+            st.error("Diagnosis and stage are required.")
+            return
+        record = normalize_record(
+            {
+                "patient_id": patient_id,
+                "age": age,
+                "sex": sex,
+                "diagnosis": diagnosis,
+                "stage": stage,
+                "ecog": ecog,
+                "biomarkers": biomarkers,
+                "imaging": imaging,
+                "pathology": pathology,
+                "comorbidities": comorbidities,
+                "medications": medications,
+                "pending_tests": pending_tests,
+                "prior_treatment": prior_treatment,
+                "notes": notes,
+                "intake_text": intake_text,
+                "source": "custom",
+            },
+            source="custom",
+        )
+        try:
+            add_custom_patient(record)
+            bump_patient_data_version()
+            st.session_state.selected_patient_label = patient_profile_label(
+                pd.Series(record)
             )
+            st.success(f"Patient {record['patient_id']} saved.")
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+
+
+def page_synthetic_intake(df: pd.DataFrame, ollama_ok: bool) -> None:
+    st.subheader("Synthetic case generator")
+    st.caption(
+        "AI-generated fictional cases for training (Synthia-style workflow). "
+        "Review and edit before saving."
+    )
+
+    if not ollama_ok:
+        st.warning("Start Ollama to generate synthetic cases.")
+        return
+
+    cancer_hint = st.text_input("Cancer type or focus", placeholder="e.g. Glioblastoma, NSCLC")
+    constraints = st.text_area(
+        "Constraints (optional)",
+        placeholder="e.g. ECOG 2, include pending molecular tests",
+        height=60,
+    )
+
+    if st.button("Generate synthetic patient", type="primary"):
+        with st.spinner("Generating fictional case…"):
+            try:
+                draft = generate_synthetic_patient(cancer_hint, constraints)
+                st.session_state["synthetic_draft"] = draft
+            except Exception as exc:
+                st.error(f"Generation failed: {exc}")
+                return
+
+    draft = st.session_state.get("synthetic_draft")
+    if not draft:
+        st.info("Describe a cancer focus and generate a draft case.")
+        return
+
+    st.markdown("##### Review draft")
+    draft["patient_id"] = next_patient_id(df)
+
+    long_fields = {
+        "biomarkers",
+        "imaging",
+        "pathology",
+        "pending_tests",
+        "notes",
+        "intake_text",
+    }
+
+    with st.form("save_synthetic_form"):
+        edited: dict = {}
+        for col in PATIENT_COLUMNS:
+            if col == "source":
+                continue
+            label = col.replace("_", " ").title()
+            raw = draft.get(col, "")
+            if col == "age":
+                edited[col] = st.number_input(label, min_value=0, max_value=120, value=int(raw or 60))
+            elif col == "ecog":
+                edited[col] = st.selectbox(label, [0, 1, 2, 3, 4], index=int(raw or 0))
+            elif col == "sex":
+                s = str(raw or "F")[:1].upper()
+                edited[col] = st.selectbox(label, ["F", "M", "U"], index=["F", "M", "U"].index(s) if s in "FMU" else 0)
+            elif col in long_fields:
+                edited[col] = st.text_area(label, value=str(raw), height=80)
+            else:
+                edited[col] = st.text_input(label, value=str(raw))
+
+        if st.form_submit_button("Save to patient panel", type="primary"):
+            record = normalize_record({**draft, **edited, "source": "synthetic"}, source="synthetic")
+            try:
+                add_custom_patient(record)
+                bump_patient_data_version()
+                st.session_state.pop("synthetic_draft", None)
+                st.session_state.selected_patient_label = patient_profile_label(pd.Series(record))
+                st.success(f"Saved synthetic patient {record['patient_id']}.")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+
+def main() -> None:
+    st.set_page_config(
+        page_title="Tumor Board Assist",
+        page_icon="🏥",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+    inject_styles()
+
+    version = st.session_state.get("patients_version", 0)
+    df = get_patients_df(version)
+    ollama_ok = check_ollama_reachable()
+
+    with st.sidebar:
+        st.markdown("## Tumor Board Assist")
+        st.caption("Multidisciplinary review workspace")
+        if not ollama_ok:
+            st.error("Ollama offline — AI features disabled")
+
+        row = sidebar_patient_picker(df)
+        st.divider()
+        nav = st.radio(
+            "Workspace",
+            ["Patient chart", "Add patient", "Synthetic intake"],
+            label_visibility="collapsed",
+        )
+
+    if nav == "Patient chart":
+        page_patient_chart(df, ollama_ok)
+    elif nav == "Add patient":
+        page_add_patient(df)
+    else:
+        page_synthetic_intake(df, ollama_ok)
+
+    render_footer()
 
 
 if __name__ == "__main__":

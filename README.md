@@ -28,9 +28,14 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Ollama chat uses `temperature: 0.2`, `num_predict: 700`, and `keep_alive: 30m`. Prompt text lives in `prompts/tumor_board_summary.txt` (`PROMPT_VERSION` in code). Summaries are cached by patient id, record content, and cache-bust token.
+**Tumor Board Assist** includes:
 
-**App features:** side-by-side record/summary, cache/regenerate/clear, Markdown export, streaming on **Regenerate**.
+- **Patient chart** — per-patient profile and MDT brief generation
+- **Add patient** — manual text intake (structured fields + clinical narrative)
+- **Synthetic intake** — AI-generated fictional cases (review before save)
+- Custom patients saved to `data/synthetic_patients/custom_patients.json`
+
+Ollama chat uses `temperature: 0.2`, `num_predict: 700`, and `keep_alive: 30m`. Summaries are cached by patient id and record content.
 
 **Batch evaluation:**
 

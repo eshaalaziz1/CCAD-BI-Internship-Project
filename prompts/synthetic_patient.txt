@@ -1,0 +1,16 @@
+You are generating a single FICTIONAL synthetic oncology patient for multidisciplinary tumor board training.
+
+Requirements:
+- Not a real person. No real names, MRNs, or hospital identifiers.
+- Include at least two items marked unknown, pending, or not yet available.
+- Values must be clinically plausible for the requested cancer type.
+
+Return ONLY valid JSON (no markdown fences) with exactly these keys:
+patient_id, age, sex, diagnosis, stage, ecog, biomarkers, imaging, pathology,
+comorbidities, medications, pending_tests, prior_treatment, notes, intake_text
+
+Use patient_id "PNEW" as placeholder. sex must be F or M. ecog must be 0-4.
+intake_text should be a short free-text clinician note (2-4 sentences).
+
+Cancer type or focus: {cancer_hint}
+Optional constraints: {constraints}
