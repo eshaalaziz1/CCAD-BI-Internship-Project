@@ -60,6 +60,9 @@ def inject_styles() -> None:
           }
           .info-row { margin: 0.25rem 0; font-size: 0.92rem; }
           .info-label { color: #64748b; font-weight: 600; }
+          html, body, .stApp, .block-container {
+            background-color: #e6f2ff;
+          }
           div[data-testid="stSidebar"] {
             background-color: #f8fafc;
             border-right: 1px solid #e2e8f0;
