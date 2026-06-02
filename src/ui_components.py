@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import html
+import re
+
 import streamlit as st
+import streamlit.components.v1 as components
 
 from src.constants import MODEL
 
@@ -70,6 +74,64 @@ def inject_styles() -> None:
           @keyframes floatIn {
             from { opacity: 0; transform: translateY(14px) scale(0.985); }
             to { opacity: 1; transform: translateY(0) scale(1); }
+          }
+          @keyframes progressGlow {
+            0%, 100% { box-shadow: 0 0 10px rgba(31,138,131,0.24); }
+            50% { box-shadow: 0 0 18px rgba(184,128,32,0.28); }
+          }
+          @keyframes loaderSweep {
+            0% { transform: translateX(-105%); }
+            100% { transform: translateX(105%); }
+          }
+          @keyframes nodePulse {
+            0%, 100% { transform: scale(1); opacity: 0.65; }
+            50% { transform: scale(1.18); opacity: 1; }
+          }
+          @keyframes textFlicker {
+            0%, 100% { opacity: 0.72; }
+            50% { opacity: 1; }
+          }
+
+          .scroll-progress {
+            position: fixed;
+            left: 0;
+            top: 0;
+            width: 0%;
+            height: 3px;
+            z-index: 999999;
+            background: linear-gradient(90deg, var(--teal), var(--brand-2), var(--gold));
+            animation: progressGlow 2.8s ease-in-out infinite;
+            transition: width 120ms ease-out;
+          }
+          .cursor-glow {
+            position: fixed;
+            width: 19rem;
+            height: 19rem;
+            pointer-events: none;
+            border-radius: 999px;
+            background: radial-gradient(circle, rgba(31,138,131,0.13), rgba(47,123,143,0.07) 35%, transparent 68%);
+            transform: translate(-50%, -50%);
+            filter: blur(4px);
+            opacity: 0;
+            transition: opacity 220ms ease;
+            z-index: 0;
+          }
+
+          .reveal-on-scroll {
+            opacity: 0;
+            transform: translateY(18px) scale(0.985);
+            filter: blur(3px);
+            transition:
+              opacity 520ms ease,
+              transform 520ms cubic-bezier(.2,.8,.2,1),
+              filter 520ms ease;
+            transition-delay: var(--reveal-delay, 0ms);
+            will-change: opacity, transform, filter;
+          }
+          .reveal-on-scroll.is-visible {
+            opacity: 1;
+            transform: translateY(0) scale(1);
+            filter: blur(0);
           }
 
           /* Extra top padding prevents first-row controls from clipping under Streamlit header. */
@@ -498,36 +560,179 @@ def inject_styles() -> None:
             background: rgba(255,255,255,0.92);
             border: 1px solid var(--line);
             border-radius: 8px;
-            padding: 1rem 1.1rem;
+            padding: 1.15rem 1.25rem;
             box-shadow: var(--soft-shadow);
             margin-top: 0.75rem;
             animation: fadeUp 220ms ease-out both;
+            position: relative;
+            overflow: hidden;
           }
-          .summary-panel h4 {
-            color: var(--brand);
-            font-size: 0.98rem;
-            margin: 0.85rem 0 0.25rem;
-          }
-          .summary-panel h4:first-child { margin-top: 0; }
-          .summary-panel ul { margin-top: 0.25rem; padding-left: 1.25rem; }
-          .summary-panel li { margin-bottom: 0.28rem; }
-          .summary-section {
-            background: rgba(255,255,255,0.78);
-            border: 1px solid #e0e9f2;
-            border-left: 4px solid var(--teal);
+
+          .generation-loader {
+            position: relative;
+            overflow: hidden;
+            background:
+              linear-gradient(135deg, rgba(255,255,255,0.92), rgba(247,251,255,0.86)),
+              radial-gradient(circle at 18% 18%, rgba(31,138,131,0.12), transparent 12rem);
+            border: 1px solid var(--line);
             border-radius: 8px;
-            padding: 0.85rem 0.95rem;
-            margin: 0.7rem 0;
-            box-shadow: 0 4px 14px rgba(34,57,86,0.05);
+            padding: 1.05rem 1.1rem;
+            box-shadow: var(--soft-shadow);
+            margin: 0.8rem 0;
+            animation: fadeUp 180ms ease-out both;
           }
-          .summary-section h4 {
-            margin: 0 0 0.35rem;
+          .generation-loader::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(110deg, transparent, rgba(255,255,255,0.68), transparent);
+            transform: translateX(-105%);
+            animation: loaderSweep 1.9s ease-in-out infinite;
+          }
+          .loader-top {
+            position: relative;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 0.85rem;
+          }
+          .loader-title {
+            color: var(--ink);
+            font-weight: 850;
+            font-size: 0.98rem;
+          }
+          .loader-subtitle {
+            color: var(--muted);
+            font-size: 0.82rem;
+            font-weight: 650;
+            animation: textFlicker 1.8s ease-in-out infinite;
+          }
+          .loader-percent {
             color: var(--brand);
-            font-size: 0.96rem;
+            font-weight: 900;
+            font-size: 1.15rem;
+            font-variant-numeric: tabular-nums;
+            min-width: 3.4rem;
+            text-align: right;
+          }
+          .loader-track {
+            position: relative;
+            height: 0.55rem;
+            border-radius: 999px;
+            background: #e5eef6;
+            overflow: hidden;
+            border: 1px solid #d5e2ef;
+          }
+          .loader-track::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            width: 54%;
+            border-radius: 999px;
+            background: linear-gradient(90deg, var(--teal), var(--brand-2), var(--gold));
+            box-shadow: 0 0 18px rgba(31,138,131,0.25);
+            animation: loaderSweep 1.55s cubic-bezier(.4,0,.2,1) infinite;
+          }
+          .loader-fill {
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            z-index: 2;
+            border-radius: 999px;
+            background: linear-gradient(90deg, var(--teal), var(--brand-2), var(--gold));
+            box-shadow: 0 0 18px rgba(31,138,131,0.22);
+            transition: width 260ms cubic-bezier(.2,.8,.2,1);
+          }
+          .loader-nodes {
+            display: flex;
+            justify-content: space-between;
+            gap: 0.5rem;
+            margin-top: 0.75rem;
+            position: relative;
+          }
+          .loader-node {
+            display: flex;
+            align-items: center;
+            gap: 0.35rem;
+            color: var(--muted);
+            font-size: 0.76rem;
+            font-weight: 750;
+            transition: color 180ms ease, transform 180ms ease;
+          }
+          .loader-node.active {
+            color: var(--brand);
+            transform: translateY(-1px);
+          }
+          .loader-node::before {
+            content: "";
+            width: 0.48rem;
+            height: 0.48rem;
+            border-radius: 999px;
+            background: var(--teal);
+            animation: nodePulse 1.7s ease-in-out infinite;
+          }
+          .loader-node:nth-child(2)::before { animation-delay: 220ms; background: var(--brand-2); }
+          .loader-node:nth-child(3)::before { animation-delay: 440ms; background: var(--gold); }
+          .summary-panel::before {
+            content: "";
+            position: absolute;
+            inset: 0 auto 0 0;
+            width: 5px;
+            background: linear-gradient(180deg, var(--teal), var(--brand-2), var(--gold));
+          }
+          .summary-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 1rem;
+            border-bottom: 1px solid var(--line);
+            padding-bottom: 0.85rem;
+            margin-bottom: 0.9rem;
+          }
+          .summary-header h3 {
+            margin: 0;
+            color: var(--ink);
+            font-size: 1.08rem;
+            line-height: 1.2;
+          }
+          .summary-header span {
+            color: var(--muted);
+            font-size: 0.78rem;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            white-space: nowrap;
+          }
+          .summary-section {
+            padding: 0.15rem 0 0.9rem 0;
+            margin: 0 0 0.85rem 0;
+            border-bottom: 1px solid rgba(217,228,239,0.78);
+          }
+          .summary-section:last-child { border-bottom: 0; margin-bottom: 0; padding-bottom: 0; }
+          .summary-section h4 {
+            margin: 0 0 0.45rem;
+            color: var(--brand);
+            font-size: 0.86rem;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
           }
           .summary-section p,
           .summary-section li {
             color: var(--ink);
+            font-size: 0.96rem;
+            line-height: 1.58;
+          }
+          .summary-section p {
+            margin: 0;
+          }
+          .summary-section ul {
+            margin: 0.15rem 0 0;
+            padding-left: 1.15rem;
+          }
+          .summary-section li {
+            margin-bottom: 0.32rem;
           }
 
           div[data-testid="stMetric"] {
@@ -598,6 +803,22 @@ def inject_styles() -> None:
             .app-titlebar { margin-top: 0.2rem; }
           }
 
+          @media (prefers-reduced-motion: reduce) {
+            *,
+            *::before,
+            *::after {
+              animation-duration: 0.001ms !important;
+              animation-iteration-count: 1 !important;
+              scroll-behavior: auto !important;
+              transition-duration: 0.001ms !important;
+            }
+            .reveal-on-scroll {
+              opacity: 1;
+              transform: none;
+              filter: none;
+            }
+          }
+
           .platform-footer {
             text-align: center;
             color: #8796aa;
@@ -609,6 +830,112 @@ def inject_styles() -> None:
         </style>
         """,
         unsafe_allow_html=True,
+    )
+    components.html(
+        """
+        <script>
+          (() => {
+            const rootDoc = window.parent.document;
+            const reduceMotion = window.parent.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+            if (!rootDoc.querySelector(".scroll-progress")) {
+              const progress = rootDoc.createElement("div");
+              progress.className = "scroll-progress";
+              rootDoc.body.appendChild(progress);
+            }
+            if (!rootDoc.querySelector(".cursor-glow")) {
+              const glow = rootDoc.createElement("div");
+              glow.className = "cursor-glow";
+              rootDoc.body.appendChild(glow);
+            }
+
+            const updateProgress = () => {
+              const progress = rootDoc.querySelector(".scroll-progress");
+              if (!progress) return;
+              const doc = rootDoc.documentElement;
+              const max = Math.max(doc.scrollHeight - doc.clientHeight, 1);
+              const pct = Math.min(100, Math.max(0, (doc.scrollTop / max) * 100));
+              progress.style.width = `${pct}%`;
+            };
+
+            window.parent.removeEventListener("scroll", window.__tbaProgressHandler || (() => {}));
+            window.__tbaProgressHandler = updateProgress;
+            window.parent.addEventListener("scroll", updateProgress, { passive: true });
+            updateProgress();
+
+            const glow = rootDoc.querySelector(".cursor-glow");
+            if (glow && !reduceMotion) {
+              window.parent.removeEventListener("mousemove", window.__tbaGlowHandler || (() => {}));
+              window.__tbaGlowHandler = (event) => {
+                glow.style.left = `${event.clientX}px`;
+                glow.style.top = `${event.clientY}px`;
+                glow.style.opacity = "1";
+              };
+              window.parent.addEventListener("mousemove", window.__tbaGlowHandler, { passive: true });
+            }
+
+            const revealSelector = [
+              ".app-titlebar",
+              ".home-hero",
+              ".home-stat-card",
+              ".workflow-step",
+              ".profile-hero",
+              ".info-card",
+              ".summary-panel",
+              ".generation-loader",
+              ".summary-section",
+              "div[data-testid='stMetric']",
+              "div[data-testid='stDataFrame']",
+              "div[data-testid='stExpander']"
+            ].join(",");
+
+            const markRevealTargets = () => {
+              const targets = [...rootDoc.querySelectorAll(revealSelector)];
+              targets.forEach((el, idx) => {
+                if (el.dataset.revealReady) return;
+                el.dataset.revealReady = "true";
+                el.classList.add("reveal-on-scroll");
+                el.style.setProperty("--reveal-delay", `${Math.min(idx % 6, 5) * 45}ms`);
+                if (reduceMotion) {
+                  el.classList.add("is-visible");
+                } else if (el.getBoundingClientRect().top < window.parent.innerHeight * 0.92) {
+                  el.classList.add("is-visible");
+                }
+              });
+            };
+
+            if (!reduceMotion) {
+              if (window.__tbaRevealObserver) window.__tbaRevealObserver.disconnect();
+              window.__tbaRevealObserver = new IntersectionObserver((entries) => {
+                entries.forEach((entry) => {
+                  if (entry.isIntersecting) {
+                    entry.target.classList.add("is-visible");
+                    window.__tbaRevealObserver.unobserve(entry.target);
+                  }
+                });
+              }, { root: null, threshold: 0.12, rootMargin: "0px 0px -8% 0px" });
+            }
+
+            const observeTargets = () => {
+              markRevealTargets();
+              if (reduceMotion || !window.__tbaRevealObserver) return;
+              rootDoc.querySelectorAll(".reveal-on-scroll:not(.is-visible)").forEach((el) => {
+                window.__tbaRevealObserver.observe(el);
+              });
+            };
+
+            observeTargets();
+
+            if (window.__tbaMutationObserver) window.__tbaMutationObserver.disconnect();
+            window.__tbaMutationObserver = new MutationObserver(() => {
+              window.clearTimeout(window.__tbaRevealTimer);
+              window.__tbaRevealTimer = window.setTimeout(observeTargets, 80);
+            });
+            window.__tbaMutationObserver.observe(rootDoc.body, { childList: true, subtree: true });
+          })();
+        </script>
+        """,
+        height=0,
     )
 
 
@@ -669,30 +996,84 @@ def render_profile_sections(row, columns: list[str]) -> None:
 
 
 def parse_summary_sections(text: str) -> dict[str, str]:
-    import re
-
     sections: dict[str, str] = {}
-    for block in re.split(r"\n(?=\d+\.\s+)", text.strip()):
-        match = re.match(r"^\d+\.\s+([^\n]+)\n?(.*)", block.strip(), re.DOTALL)
-        if match:
-            sections[match.group(1).strip()] = match.group(2).strip()
+
+    title_lookup = {title.lower(): title for title in SECTION_ORDER}
+    title_pattern = "|".join(re.escape(title) for title in SECTION_ORDER)
+    pattern = re.compile(
+        rf"(?:^|\n)\s*(?:\d+\.\s*)?({title_pattern})\s*:?\s*(.*?)(?=(?:\n\s*(?:\d+\.\s*)?(?:{title_pattern})\s*:?)|\Z)",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    for match in pattern.finditer(text.strip()):
+        title = title_lookup[match.group(1).lower()]
+        body = _clean_summary_body(match.group(2))
+        if body:
+            sections[title] = body
     return sections
+
+
+def _clean_summary_body(text: str) -> str:
+    cleaned = re.sub(r"<think>.*?</think>", "", text or "", flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"<unused\d+>\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"</?[^>\s]+>", "", cleaned)
+    stop_match = re.search(
+        r"(Constraint Checklist|Confidence Score|Mental Sandbox|Patient data:|The user wants|I need to)",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    if stop_match:
+        cleaned = cleaned[: stop_match.start()]
+    return cleaned.strip()
+
+
+def _summary_body_to_html(text: str) -> str:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return "<p>Not specified in the provided patient data.</p>"
+
+    bullet_items = []
+    prose_lines = []
+    for line in lines:
+        bullet_match = re.match(r"^(?:[-*]\s+|\d+[.)]\s+)(.+)$", line)
+        if bullet_match:
+            bullet_items.append(bullet_match.group(1).strip())
+        else:
+            prose_lines.append(line)
+
+    parts = []
+    if prose_lines:
+        parts.append(f"<p>{html.escape(' '.join(prose_lines))}</p>")
+    if bullet_items:
+        items = "".join(f"<li>{html.escape(item)}</li>" for item in bullet_items)
+        parts.append(f"<ul>{items}</ul>")
+    return "".join(parts)
 
 
 def display_summary(text: str) -> None:
     sections = parse_summary_sections(text)
     if not sections:
-        st.markdown(text)
+        st.warning("MedGemma did not return a usable MDT brief. Please regenerate.")
         return
-    st.markdown('<div class="summary-panel">', unsafe_allow_html=True)
+
+    html_sections = []
     for title in SECTION_ORDER:
         if sections.get(title):
-            st.markdown(f'<div class="summary-section"><h4>{title}</h4>', unsafe_allow_html=True)
-            st.markdown(sections[title])
-            st.markdown("</div>", unsafe_allow_html=True)
-    for title in sections:
-        if title not in SECTION_ORDER:
-            st.markdown(f'<div class="summary-section"><h4>{title}</h4>', unsafe_allow_html=True)
-            st.markdown(sections[title])
-            st.markdown("</div>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+            html_sections.append(
+                "<section class='summary-section'>"
+                f"<h4>{html.escape(title)}</h4>"
+                f"{_summary_body_to_html(sections[title])}"
+                "</section>"
+            )
+
+    st.markdown(
+        (
+            "<article class='summary-panel'>"
+            "<div class='summary-header'>"
+            "<h3>MDT Brief</h3>"
+            f"<span>{html.escape(MODEL)}</span>"
+            "</div>"
+            f"{''.join(html_sections)}"
+            "</article>"
+        ),
+        unsafe_allow_html=True,
+    )

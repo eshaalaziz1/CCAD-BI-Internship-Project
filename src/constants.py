@@ -1,7 +1,7 @@
 """Shared config constants (no Ollama import)."""
 
 MODEL = "medgemma1.5"
-PROMPT_VERSION = "v1"
+PROMPT_VERSION = "v5"
 TEMPERATURE = 0.2
 NUM_PREDICT = 700
 KEEP_ALIVE = "30m"

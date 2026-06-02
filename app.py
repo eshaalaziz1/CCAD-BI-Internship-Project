@@ -6,12 +6,13 @@ import hashlib
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import pandas as pd
 import streamlit as st
 
-from src.constants import MODEL
+from src.constants import MODEL, PROMPT_VERSION
 from src.patients import (
     PATIENT_COLUMNS,
     add_custom_patient,
@@ -24,7 +25,6 @@ from src.patients import (
 )
 from src.summarizer import (
     check_ollama_reachable,
-    stream_summarize_patient,
     summarize_patient,
 )
 from src.synthetic_generator import generate_synthetic_patient
@@ -62,6 +62,7 @@ def get_cached_summary(
     patient_id: str,
     patient_data: str,
     cache_bust: int,
+    prompt_version: str,
     precomputed: str | None = None,
 ) -> str:
     if precomputed is not None:
@@ -70,13 +71,187 @@ def get_cached_summary(
 
 
 def _summary_cache_key(patient_id: str, fingerprint: str, cache_bust: int) -> str:
-    return f"{patient_id}:{fingerprint}:{cache_bust}"
+    return f"{PROMPT_VERSION}:{patient_id}:{fingerprint}:{cache_bust}"
 
 
 def _mark_summary_warmed(cache_key: str) -> None:
     warmed = set(st.session_state.get("summary_warmed_keys", set()))
     warmed.add(cache_key)
     st.session_state["summary_warmed_keys"] = warmed
+
+
+def render_generation_loader(progress: int = 12, stage: str = "Context") -> None:
+    progress = max(8, min(progress, 100))
+    context_class = "active" if progress >= 12 else ""
+    structure_class = "active" if progress >= 42 else ""
+    brief_class = "active" if progress >= 72 else ""
+    st.markdown(
+        f"""
+        <style>
+          @keyframes tbaLoaderSweep {{
+            0% {{ transform: translateX(-120%); }}
+            100% {{ transform: translateX(120%); }}
+          }}
+          @keyframes tbaNodePulse {{
+            0%, 100% {{ transform: scale(1); opacity: 0.62; }}
+            50% {{ transform: scale(1.22); opacity: 1; }}
+          }}
+          @keyframes tbaLoaderFloat {{
+            from {{ opacity: 0; transform: translateY(10px) scale(0.985); }}
+            to {{ opacity: 1; transform: translateY(0) scale(1); }}
+          }}
+          .tba-live-loader {{
+            position: relative;
+            overflow: hidden;
+            margin: 1rem 0 0.85rem;
+            padding: 1.05rem 1.1rem;
+            border-radius: 10px;
+            border: 1px solid rgba(190, 212, 226, 0.95);
+            background:
+              radial-gradient(circle at 18% 22%, rgba(31, 138, 131, 0.17), transparent 10rem),
+              linear-gradient(135deg, rgba(255,255,255,0.96), rgba(238,246,251,0.92));
+            box-shadow: 0 18px 40px rgba(34, 57, 86, 0.13);
+            animation: tbaLoaderFloat 220ms ease-out both;
+          }}
+          .tba-live-loader::before {{
+            content: "";
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(110deg, transparent, rgba(255,255,255,0.75), transparent);
+            transform: translateX(-120%);
+            animation: tbaLoaderSweep 2.1s ease-in-out infinite;
+          }}
+          .tba-loader-top {{
+            position: relative;
+            z-index: 2;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 1rem;
+            margin-bottom: 0.85rem;
+          }}
+          .tba-loader-title {{
+            color: #172033;
+            font-weight: 850;
+            font-size: 1rem;
+            letter-spacing: 0;
+            line-height: 1.2;
+          }}
+          .tba-loader-subtitle {{
+            color: #65748b;
+            font-weight: 650;
+            font-size: 0.84rem;
+            margin-top: 0.25rem;
+            line-height: 1.35;
+          }}
+          .tba-loader-percent {{
+            color: #255e7e;
+            font-weight: 900;
+            font-size: 1.28rem;
+            font-variant-numeric: tabular-nums;
+            line-height: 1;
+            min-width: 3.8rem;
+            text-align: right;
+          }}
+          .tba-loader-track {{
+            position: relative;
+            z-index: 2;
+            height: 0.72rem;
+            border-radius: 999px;
+            overflow: hidden;
+            background: #dfeaf3;
+            border: 1px solid #cfddea;
+            box-shadow: inset 0 1px 3px rgba(23, 32, 51, 0.08);
+          }}
+          .tba-loader-fill {{
+            height: 100%;
+            width: {progress}%;
+            border-radius: 999px;
+            background: linear-gradient(90deg, #1f8a83, #2f7b8f, #b88020);
+            box-shadow: 0 0 18px rgba(31,138,131,0.32);
+            transition: width 260ms cubic-bezier(.2,.8,.2,1);
+          }}
+          .tba-loader-nodes {{
+            position: relative;
+            z-index: 2;
+            display: flex;
+            justify-content: space-between;
+            gap: 0.6rem;
+            margin-top: 0.82rem;
+          }}
+          .tba-loader-node {{
+            display: inline-flex;
+            align-items: center;
+            gap: 0.42rem;
+            color: #65748b;
+            font-size: 0.78rem;
+            font-weight: 800;
+            line-height: 1;
+          }}
+          .tba-loader-node::before {{
+            content: "";
+            width: 0.55rem;
+            height: 0.55rem;
+            border-radius: 999px;
+            background: #9dafbf;
+          }}
+          .tba-loader-node.active {{
+            color: #255e7e;
+          }}
+          .tba-loader-node.active::before {{
+            background: #1f8a83;
+            animation: tbaNodePulse 1.55s ease-in-out infinite;
+          }}
+        </style>
+        <div class="tba-live-loader">
+          <div class="tba-loader-top">
+            <div>
+              <div class="tba-loader-title">MedGemma is composing the MDT brief</div>
+              <div class="tba-loader-subtitle">{stage} · local model inference in progress</div>
+            </div>
+            <div class="tba-loader-percent">{progress}%</div>
+          </div>
+          <div class="tba-loader-track"><div class="tba-loader-fill"></div></div>
+          <div class="tba-loader-nodes">
+            <div class="tba-loader-node {context_class}">Context</div>
+            <div class="tba-loader-node {structure_class}">Structure</div>
+            <div class="tba-loader-node {brief_class}">Brief</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def generate_summary_with_loader(patient_data: str) -> str:
+    loader = st.empty()
+    stages = [
+        (12, "Reading patient context"),
+        (28, "Identifying clinical facts"),
+        (45, "Checking missing information"),
+        (62, "Drafting MDT questions"),
+        (78, "Formatting treatment considerations"),
+        (90, "Finalizing brief"),
+    ]
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(summarize_patient, patient_data)
+        tick = 0
+        while not future.done():
+            base_progress, stage = stages[min(tick // 5, len(stages) - 1)]
+            shimmer = min(tick % 5, 4)
+            with loader.container():
+                render_generation_loader(base_progress + shimmer, stage)
+            time.sleep(0.18)
+            tick += 1
+
+        summary = future.result()
+
+    with loader.container():
+        render_generation_loader(100, "Brief ready")
+    time.sleep(0.25)
+    loader.empty()
+    return summary
 
 
 def load_summary(
@@ -92,14 +267,20 @@ def load_summary(
 
     if force_refresh:
         start = time.perf_counter()
-        summary = st.write_stream(stream_summarize_patient(patient_data))
+        summary = generate_summary_with_loader(patient_data)
         latency = time.perf_counter() - start
-        get_cached_summary(patient_id, patient_data, cache_bust, precomputed=summary)
+        get_cached_summary(
+            patient_id,
+            patient_data,
+            cache_bust,
+            PROMPT_VERSION,
+            precomputed=summary,
+        )
         _mark_summary_warmed(cache_key)
         return summary, False, latency
 
     from_cache = cache_key in warmed_keys
-    summary = get_cached_summary(patient_id, patient_data, cache_bust)
+    summary = get_cached_summary(patient_id, patient_data, cache_bust, PROMPT_VERSION)
     if not from_cache:
         _mark_summary_warmed(cache_key)
     return summary, from_cache, None
@@ -350,13 +531,15 @@ def page_patient_chart(df: pd.DataFrame, ollama_ok: bool) -> None:
             st.session_state[bust_key] = st.session_state.get(bust_key, 0) + 1
 
         if generate or regenerate:
+            st.session_state.pop("summary", None)
+            st.session_state.pop("summary_meta", None)
             try:
                 summary, from_cache, latency = load_summary(
                     patient_id,
                     patient_data,
                     fingerprint,
                     st.session_state.get(bust_key, 0),
-                    force_refresh=regenerate,
+                    force_refresh=True,
                 )
                 st.session_state["summary"] = summary
                 st.session_state["summary_meta"] = {
@@ -364,6 +547,7 @@ def page_patient_chart(df: pd.DataFrame, ollama_ok: bool) -> None:
                     "fingerprint": fingerprint,
                     "from_cache": from_cache,
                     "latency_sec": latency,
+                    "prompt_version": PROMPT_VERSION,
                 }
             except Exception as exc:
                 st.error(f"Summary generation failed: {exc}")
@@ -374,6 +558,7 @@ def page_patient_chart(df: pd.DataFrame, ollama_ok: bool) -> None:
             summary
             and meta.get("patient_id") == patient_id
             and meta.get("fingerprint") == fingerprint
+            and meta.get("prompt_version") == PROMPT_VERSION
         ):
             if meta.get("from_cache"):
                 st.caption("Cached brief for this record.")
