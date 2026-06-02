@@ -195,6 +195,21 @@ def page_home(df: pd.DataFrame) -> None:
     synthetic_count = int((df.get("source", "") == "synthetic").sum()) if "source" in df else 0
     reference_count = max(len(df) - custom_count - synthetic_count, 0)
 
+    st.markdown(
+        """
+        <div class="home-hero">
+          <h1>Tumor Board Assist</h1>
+          <p>Clinical review workspace for synthetic oncology cases, MDT briefs, and patient intake.</p>
+          <div class="workflow-strip">
+            <div class="workflow-step"><strong>Review</strong><span>Select a patient and scan the core clinical profile.</span></div>
+            <div class="workflow-step"><strong>Generate</strong><span>Create a concise MDT-ready brief using local MedGemma.</span></div>
+            <div class="workflow-step"><strong>Refine</strong><span>Add custom or synthetic cases for training workflows.</span></div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     stat_a, stat_b, stat_c = st.columns(3)
     with stat_a:
         st.markdown(
@@ -212,15 +227,25 @@ def page_home(df: pd.DataFrame) -> None:
             unsafe_allow_html=True,
         )
 
+    st.markdown("#### Case mix")
+    preview_cols = ["patient_id", "diagnosis", "stage", "age", "sex", "source"]
+    available_cols = [col for col in preview_cols if col in df.columns]
+    st.dataframe(
+        df[available_cols].head(10),
+        use_container_width=True,
+        hide_index=True,
+    )
+
 
 def render_ollama_status_light(ollama_ok: bool) -> None:
-    color = "#16a34a" if ollama_ok else "#dc2626"
+    color = "#1f8a83" if ollama_ok else "#b45c63"
+    label = "Ollama online" if ollama_ok else "Ollama offline"
     st.markdown(
         (
-            "<div style='display:flex; justify-content:flex-end; align-items:center; gap:0.45rem;"
-            "padding-top:0.25rem;'>"
-            f"<span style='width:12px; height:12px; border-radius:999px; background:{color}; "
-            "display:inline-block; box-shadow: 0 0 0 2px rgba(15,61,92,0.08);'></span>"
+            "<div style='display:flex; justify-content:flex-end; padding-top:0.65rem;'>"
+            f"<div class='status-pill status-dot-only' title='{label}' aria-label='{label}'>"
+            f"<span class='status-dot' style='background:{color};'></span>"
+            "</div>"
             "</div>"
         ),
         unsafe_allow_html=True,
@@ -535,8 +560,16 @@ def main() -> None:
     nav = render_top_nav()
     c_brand, c_status = st.columns([1.8, 0.6])
     with c_brand:
-        st.markdown("## Tumor Board Assist")
-        st.caption("Multidisciplinary review workspace")
+        st.markdown(
+            """
+            <div class="app-titlebar">
+              <div class="product-kicker">Local MedGemma MDT workspace</div>
+              <h2>Tumor Board Assist</h2>
+              <p>Multidisciplinary oncology review workspace</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
     with c_status:
         render_ollama_status_light(ollama_ok)
 
