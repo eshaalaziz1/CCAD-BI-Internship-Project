@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import time
 from datetime import datetime, timezone
 
@@ -142,14 +143,128 @@ def sidebar_patient_picker(df: pd.DataFrame) -> pd.Series:
         return df.iloc[0]
 
     labels = [patient_profile_label(row) for _, row in filtered.iterrows()]
+    current = st.session_state.get("selected_patient_label")
+    if current not in labels:
+        current = labels[0]
+        st.session_state.selected_patient_label = current
+    idx = labels.index(current)
+
+    p_col, n_col = st.columns(2)
+    with p_col:
+        if st.button("Prev", disabled=idx <= 0, key="patient_prev"):
+            st.session_state.selected_patient_label = labels[idx - 1]
+            st.rerun()
+    with n_col:
+        if st.button("Next", disabled=idx >= len(labels) - 1, key="patient_next"):
+            st.session_state.selected_patient_label = labels[idx + 1]
+            st.rerun()
+
     choice = st.radio(
         "Patients",
         labels,
+        index=idx,
         label_visibility="collapsed",
-        key="sidebar_patient_radio",
+        key="selected_patient_label",
     )
-    st.session_state.selected_patient_label = choice
     return filtered.iloc[labels.index(choice)]
+
+
+def render_top_nav() -> str:
+    nav_options = ["Home", "Patients", "Add patient", "Synthetic intake"]
+    st.session_state.setdefault("workspace_nav", nav_options[0])
+    active = st.session_state["workspace_nav"]
+
+    # Defensive spacing: some Streamlit layouts clip first-row controls near the header.
+    st.markdown("<div class='top-nav-safe-offset'></div>", unsafe_allow_html=True)
+    cols = st.columns(len(nav_options))
+    for idx, option in enumerate(nav_options):
+        with cols[idx]:
+            if st.button(
+                option,
+                key=f"top_nav_{option.lower().replace(' ', '_')}",
+                type="primary" if option == active else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state["workspace_nav"] = option
+                st.rerun()
+    return st.session_state["workspace_nav"]
+
+
+def page_home(df: pd.DataFrame) -> None:
+    custom_count = int((df.get("source", "") == "custom").sum()) if "source" in df else 0
+    synthetic_count = int((df.get("source", "") == "synthetic").sum()) if "source" in df else 0
+    reference_count = max(len(df) - custom_count - synthetic_count, 0)
+
+    stat_a, stat_b, stat_c = st.columns(3)
+    with stat_a:
+        st.markdown(
+            f"<div class='home-stat-card'><p>Patients</p><h2>{len(df)}</h2></div>",
+            unsafe_allow_html=True,
+        )
+    with stat_b:
+        st.markdown(
+            f"<div class='home-stat-card'><p>Reference</p><h2>{reference_count}</h2></div>",
+            unsafe_allow_html=True,
+        )
+    with stat_c:
+        st.markdown(
+            f"<div class='home-stat-card'><p>Custom</p><h2>{custom_count}</h2></div>",
+            unsafe_allow_html=True,
+        )
+
+
+def render_ollama_status_light(ollama_ok: bool) -> None:
+    color = "#16a34a" if ollama_ok else "#dc2626"
+    st.markdown(
+        (
+            "<div style='display:flex; justify-content:flex-end; align-items:center; gap:0.45rem;"
+            "padding-top:0.25rem;'>"
+            f"<span style='width:12px; height:12px; border-radius:999px; background:{color}; "
+            "display:inline-block; box-shadow: 0 0 0 2px rgba(15,61,92,0.08);'></span>"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def set_sidebar_visibility(show: bool) -> None:
+    if show:
+        return
+    st.markdown(
+        """
+        <style>
+          section[data-testid="stSidebar"] { display: none; }
+          button[data-testid="collapsedControl"] { display: none; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_patient_overview(row: pd.Series) -> None:
+    st.markdown("#### Case overview")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Stage", str(row.get("stage", "—")))
+    c2.metric("Age", str(row.get("age", "—")))
+    c3.metric("ECOG", str(row.get("ecog", "—")))
+    c4.metric("Sex", str(row.get("sex", "—")))
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown("**Diagnosis**")
+        st.write(str(row.get("diagnosis", "—")))
+        st.markdown("**Biomarkers**")
+        st.write(str(row.get("biomarkers", "—")))
+    with right:
+        st.markdown("**Current workup**")
+        st.write(str(row.get("imaging", "—")))
+        st.markdown("**Pending tests**")
+        st.write(str(row.get("pending_tests", "—")))
+
+    narrative = str(row.get("intake_text", "")).strip()
+    if narrative and narrative != "nan":
+        with st.expander("Clinical narrative", expanded=False):
+            st.write(narrative)
 
 
 def page_patient_chart(df: pd.DataFrame, ollama_ok: bool) -> None:
@@ -159,12 +274,15 @@ def page_patient_chart(df: pd.DataFrame, ollama_ok: bool) -> None:
     fingerprint = record_fingerprint(patient_data)
     bust_key = f"cache_bust_{patient_id}"
 
-    render_profile_hero(row)
+    left, right = st.columns([0.52, 0.48])
 
-    tab_profile, tab_summary = st.tabs(["Patient profile", "MDT summary"])
-
-    with tab_profile:
-        render_profile_sections(row, list(row.index))
+    with left:
+        render_profile_hero(row)
+        tab_overview, tab_profile = st.tabs(["Overview", "Full profile"])
+        with tab_overview:
+            render_patient_overview(row)
+        with tab_profile:
+            render_profile_sections(row, list(row.index))
         if str(row.get("source", "")) in ("custom", "synthetic"):
             if st.button("Remove this patient", type="secondary"):
                 try:
@@ -177,17 +295,23 @@ def page_patient_chart(df: pd.DataFrame, ollama_ok: bool) -> None:
                 except ValueError as exc:
                     st.error(str(exc))
 
-    with tab_summary:
+    with right:
+        st.subheader("MDT summary")
         if not ollama_ok:
             st.warning("AI summaries unavailable — start Ollama locally to enable generation.")
 
         c1, c2, c3 = st.columns(3)
         with c1:
-            generate = st.button("Generate MDT brief", type="primary", disabled=not ollama_ok)
+            generate = st.button(
+                "Generate MDT brief",
+                type="primary",
+                disabled=not ollama_ok,
+                key="generate_mdt_brief",
+            )
         with c2:
-            regenerate = st.button("Regenerate", disabled=not ollama_ok)
+            regenerate = st.button("Regenerate", disabled=not ollama_ok, key="regenerate_mdt_brief")
         with c3:
-            clear_cache = st.button("Reset cache")
+            clear_cache = st.button("Reset cache", key="reset_mdt_cache")
 
         if clear_cache:
             st.session_state[bust_key] = st.session_state.get(bust_key, 0) + 1
@@ -321,13 +445,11 @@ def page_add_patient(df: pd.DataFrame) -> None:
 
 
 def page_synthetic_intake(df: pd.DataFrame, ollama_ok: bool) -> None:
+    provider = os.getenv("SYNTHETIC_GENERATOR_PROVIDER", "ollama").lower()
     st.subheader("Synthetic case generator")
-    st.caption(
-        "AI-generated fictional cases for training (Synthia-style workflow). "
-        "Review and edit before saving."
-    )
+    st.caption(f"Provider: {provider.upper()} · Review and edit before saving.")
 
-    if not ollama_ok:
+    if provider != "synthia" and not ollama_ok:
         st.warning("Start Ollama to generate synthetic cases.")
         return
 
@@ -409,21 +531,26 @@ def main() -> None:
     df = get_patients_df(version)
     ollama_ok = check_ollama_reachable()
 
-    with st.sidebar:
+    # Top bar with page sections first, then title and compact status light.
+    nav = render_top_nav()
+    c_brand, c_status = st.columns([1.8, 0.6])
+    with c_brand:
         st.markdown("## Tumor Board Assist")
         st.caption("Multidisciplinary review workspace")
-        if not ollama_ok:
-            st.error("Ollama offline — AI features disabled")
+    with c_status:
+        render_ollama_status_light(ollama_ok)
 
-        row = sidebar_patient_picker(df)
-        st.divider()
-        nav = st.radio(
-            "Workspace",
-            ["Patient chart", "Add patient", "Synthetic intake"],
-            label_visibility="collapsed",
-        )
+    set_sidebar_visibility(show=nav == "Patients")
 
-    if nav == "Patient chart":
+    with st.sidebar:
+        if nav == "Patients":
+            sidebar_patient_picker(df)
+            st.divider()
+            st.caption("Use Prev/Next for fast case switching.")
+
+    if nav == "Home":
+        page_home(df)
+    elif nav == "Patients":
         page_patient_chart(df, ollama_ok)
     elif nav == "Add patient":
         page_add_patient(df)

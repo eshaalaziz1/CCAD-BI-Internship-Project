@@ -26,7 +26,9 @@ def inject_styles() -> None:
     st.markdown(
         """
         <style>
-          .block-container { padding-top: 1.2rem; max-width: 1200px; }
+          /* Extra top padding prevents first-row controls from clipping under Streamlit header. */
+          .block-container { padding-top: 2.6rem; max-width: 1320px; }
+          .top-nav-safe-offset { height: 1.8rem; }
           .profile-hero {
             background: linear-gradient(135deg, #0f3d5c 0%, #1a5f8f 100%);
             color: #fff;
@@ -50,6 +52,7 @@ def inject_styles() -> None:
             border-radius: 8px;
             padding: 0.85rem 1rem;
             margin-bottom: 0.75rem;
+            box-shadow: 0 1px 0 rgba(15, 61, 92, 0.04);
           }
           .info-card h4 {
             margin: 0 0 0.5rem 0;
@@ -60,13 +63,68 @@ def inject_styles() -> None:
           }
           .info-row { margin: 0.25rem 0; font-size: 0.92rem; }
           .info-label { color: #64748b; font-weight: 600; }
-          html, body, .stApp, .block-container {
-            background-color: #e6f2ff;
-          }
+          html, body, .stApp, .block-container { background-color: #f3f7ff; }
           div[data-testid="stSidebar"] {
-            background-color: #f8fafc;
+            background-color: #f7fbff;
             border-right: 1px solid #e2e8f0;
           }
+
+          /* Make actions feel consistent and scan-friendly. */
+          .stButton > button { border-radius: 10px; }
+          .stButton > button[kind="primary"] {
+            background: #1a5f8f;
+            border-color: #1a5f8f;
+          }
+          .stButton > button[kind="secondary"] {
+            background: #e9f4ff;
+            border-color: #cfe3f6;
+            color: #0f3d5c;
+          }
+
+          /* Radio inputs should use the same brand accent. */
+          div[data-testid="stRadio"] input[type="radio"] { accent-color: #1a5f8f; }
+          div[data-testid="stRadio"] label { font-weight: 560; color: #1e293b; }
+
+          /* Add breathing room between main vertical blocks. */
+          div[data-testid="stVerticalBlock"] > div:has(> .element-container) {
+            margin-bottom: 0.25rem;
+          }
+
+          /* Tabs for dense content: cleaner and lighter. */
+          button[data-baseweb="tab"] {
+            border-radius: 8px 8px 0 0;
+            font-weight: 600;
+          }
+
+          .home-stat-card {
+            background: linear-gradient(170deg, #ffffff 0%, #f8fbff 100%);
+            border: 1px solid #dbe7f4;
+            border-radius: 12px;
+            padding: 0.85rem 1rem;
+            box-shadow: 0 3px 14px rgba(15, 61, 92, 0.06);
+            margin-bottom: 0.45rem;
+          }
+          .home-stat-card p {
+            margin: 0;
+            color: #64748b;
+            font-weight: 600;
+            font-size: 0.82rem;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+          }
+          .home-stat-card h2 {
+            margin: 0.25rem 0 0;
+            color: #0f3d5c;
+            font-size: 1.7rem;
+            line-height: 1.1;
+          }
+          .home-launch-title {
+            margin: 0.55rem 0 0.5rem;
+            color: #0f3d5c;
+            font-weight: 650;
+            font-size: 0.98rem;
+          }
+
           .platform-footer {
             text-align: center;
             color: #94a3b8;

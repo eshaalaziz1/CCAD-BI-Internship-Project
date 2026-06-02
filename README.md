@@ -37,6 +37,24 @@ streamlit run app.py
 
 Ollama chat uses `temperature: 0.2`, `num_predict: 700`, and `keep_alive: 30m`. Summaries are cached by patient id and record content.
 
+### Synthetic intake provider
+
+Synthetic intake supports provider selection through environment variables:
+
+```bash
+# Default behavior (existing local setup)
+export SYNTHETIC_GENERATOR_PROVIDER=ollama
+
+# Optional: switch to Synthia API
+export SYNTHETIC_GENERATOR_PROVIDER=synthia
+export SYNTHIA_API_URL="https://<your-synthia-endpoint>"
+export SYNTHIA_API_KEY="<your-api-key>"
+export SYNTHIA_MODEL="synthia-med"        # optional
+export SYNTHIA_TIMEOUT_SEC="45"           # optional
+```
+
+If `SYNTHETIC_GENERATOR_PROVIDER=synthia` is selected without API settings, generation will fail with a clear configuration error.
+
 **Batch evaluation:**
 
 ```bash
