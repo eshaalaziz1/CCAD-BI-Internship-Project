@@ -31,6 +31,7 @@ from src.summarizer import (
     check_ollama_reachable,
     summarize_patient,
 )
+from src.report_charts import render_report_charts
 from src.synthetic_generator import generate_synthetic_patient
 from src.ui_components import (
     display_summary,
@@ -629,8 +630,8 @@ def render_report_analysis(analysis: dict, report_text: str) -> None:
         unsafe_allow_html=True,
     )
 
-    tab_signal, tab_team, tab_agenda, tab_source = st.tabs(
-        ["Clinical signal", "Team focus", "Meeting agenda", "Source text"]
+    tab_signal, tab_charts, tab_team, tab_agenda, tab_source = st.tabs(
+        ["Clinical signal", "Visual insights", "Team focus", "Meeting agenda", "Source text"]
     )
 
     with tab_signal:
@@ -652,6 +653,9 @@ def render_report_analysis(analysis: dict, report_text: str) -> None:
         else:
             st.markdown("#### Priority problems")
             render_list_items(problems, "No priority problems were extracted.")
+
+    with tab_charts:
+        render_report_charts(analysis, report_text)
 
     with tab_team:
         focus = _as_list(analysis.get("specialist_focus"))
