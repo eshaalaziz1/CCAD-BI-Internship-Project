@@ -1,16 +1,19 @@
-"""Tumor Board Assist — synthetic MDT workspace."""
+"""OncoBoard clinical review workspace."""
 
 from __future__ import annotations
 
 import hashlib
 import logging
 import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from io import BytesIO
 
 import pandas as pd
 import streamlit as st
+from pypdf import PdfReader
 
 from src.constants import MODEL, PROMPT_VERSION
 from src.patients import (
@@ -24,6 +27,7 @@ from src.patients import (
     patient_profile_label,
 )
 from src.summarizer import (
+    analyze_report,
     check_ollama_reachable,
     summarize_patient,
 )
@@ -223,6 +227,30 @@ def render_generation_loader(progress: int = 12, stage: str = "Context") -> None
     )
 
 
+def render_report_loader(progress: int = 12, stage: str = "Reading report") -> None:
+    progress = max(8, min(progress, 100))
+    st.markdown(
+        f"""
+        <div class="tba-live-loader">
+          <div class="tba-loader-top">
+            <div>
+              <div class="tba-loader-title">MedGemma is preparing the board briefing</div>
+              <div class="tba-loader-subtitle">{stage} · extracting meeting-critical signal</div>
+            </div>
+            <div class="tba-loader-percent">{progress}%</div>
+          </div>
+          <div class="tba-loader-track"><div class="tba-loader-fill" style="width:{progress}%"></div></div>
+          <div class="tba-loader-nodes">
+            <div class="tba-loader-node active">Extract</div>
+            <div class="tba-loader-node {'active' if progress >= 45 else ''}">Prioritize</div>
+            <div class="tba-loader-node {'active' if progress >= 75 else ''}">Board view</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def generate_summary_with_loader(patient_data: str) -> str:
     loader = st.empty()
     stages = [
@@ -252,6 +280,37 @@ def generate_summary_with_loader(patient_data: str) -> str:
     time.sleep(0.25)
     loader.empty()
     return summary
+
+
+def analyze_report_with_loader(report_text: str) -> dict:
+    loader = st.empty()
+    stages = [
+        (12, "Reading report"),
+        (24, "Building patient snapshot"),
+        (36, "Extracting clinical facts"),
+        (48, "Prioritizing problems"),
+        (62, "Mapping specialist focus"),
+        (76, "Finding gaps and red flags"),
+        (88, "Building meeting agenda"),
+        (90, "Finalizing board view"),
+    ]
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(analyze_report, report_text)
+        tick = 0
+        while not future.done():
+            base_progress, stage = stages[min(tick // 5, len(stages) - 1)]
+            with loader.container():
+                render_report_loader(base_progress + min(tick % 5, 4), stage)
+            time.sleep(0.18)
+            tick += 1
+        analysis = future.result()
+
+    with loader.container():
+        render_report_loader(100, "Board view ready")
+    time.sleep(0.25)
+    loader.empty()
+    return analysis
 
 
 def load_summary(
@@ -289,7 +348,7 @@ def load_summary(
 def summary_to_markdown(patient_id: str, summary: str) -> str:
     return "\n".join(
         [
-            f"# MDT summary — {patient_id}",
+            f"# OncoBoard MDT summary - {patient_id}",
             f"Generated: {datetime.now(timezone.utc).isoformat()}",
             "",
             summary,
@@ -351,7 +410,7 @@ def sidebar_patient_picker(df: pd.DataFrame) -> pd.Series:
 
 
 def render_top_nav() -> str:
-    nav_options = ["Home", "Patients", "Add patient", "Synthetic intake"]
+    nav_options = ["Home", "Patients", "Report intake", "Add patient", "Synthetic intake"]
     st.session_state.setdefault("workspace_nav", nav_options[0])
     active = st.session_state["workspace_nav"]
 
@@ -379,12 +438,17 @@ def page_home(df: pd.DataFrame) -> None:
     st.markdown(
         """
         <div class="home-hero">
-          <h1>Tumor Board Assist</h1>
-          <p>Clinical review workspace for synthetic oncology cases, MDT briefs, and patient intake.</p>
+          <div class="brand-lockup hero-brand">
+            <div class="brand-mark">OB</div>
+            <div>
+              <h1>OncoBoard</h1>
+              <p>Clinical review workspace for synthetic oncology cases, MDT briefs, and patient intake.</p>
+            </div>
+          </div>
           <div class="workflow-strip">
-            <div class="workflow-step"><strong>Review</strong><span>Select a patient and scan the core clinical profile.</span></div>
-            <div class="workflow-step"><strong>Generate</strong><span>Create a concise MDT-ready brief using local MedGemma.</span></div>
-            <div class="workflow-step"><strong>Refine</strong><span>Add custom or synthetic cases for training workflows.</span></div>
+            <div class="workflow-step"><strong>Ingest</strong><span>Upload a long report and extract the decision-critical signal.</span></div>
+            <div class="workflow-step"><strong>Review</strong><span>Scan patient context, problems, gaps, and specialty questions.</span></div>
+            <div class="workflow-step"><strong>Decide</strong><span>Use an MDT-ready agenda to move through cases faster.</span></div>
           </div>
         </div>
         """,
@@ -416,6 +480,245 @@ def page_home(df: pd.DataFrame) -> None:
         use_container_width=True,
         hide_index=True,
     )
+
+
+def extract_pdf_text(uploaded_file) -> str:
+    reader = PdfReader(BytesIO(uploaded_file.getvalue()))
+    pages = []
+    for idx, page in enumerate(reader.pages, start=1):
+        try:
+            text = page.extract_text(extraction_mode="layout") or ""
+        except TypeError:
+            text = page.extract_text() or ""
+        if text.strip():
+            pages.append(f"Page {idx}\n{text.strip()}")
+    return clean_extracted_report_text("\n\n".join(pages))
+
+
+def clean_extracted_report_text(text: str) -> str:
+    """Remove teaching/commentary fragments that PDF extraction can merge into notes."""
+    annotation_markers = [
+        "Define the",
+        "specifically as possible",
+        "Convey the",
+        "establish a chronology",
+        "circumstances; exacerbating factors",
+        "associated symptoms",
+        "resolution; alleviating factors",
+        "Describe the natural history",
+        "Change or new circumstances",
+        "New duration",
+        "Reason she come in",
+        "What has patient tried",
+        "Relevant positive",
+        "Review of systems for the relevant",
+        "Relevant risk factor",
+        "This highly relevant",
+        "trivial detail",
+        "Always use generic names",
+        "Always list",
+        "Quantity",
+        "Include over-the-counter",
+        "Comment specifically",
+        "Separate each ROS",
+        "OK to refer",
+        "List positive and negative",
+        "Check for orthostatic",
+        "Description may give",
+        "Comment on all organ systems",
+        "List specific normal",
+        "This patient needs",
+        "More precise",
+        "Always include these exams",
+        "Although you can",
+        "shown below",
+        "to keep track",
+        "This list regroups",
+        "suspect are related",
+        "In the assessment",
+        "You should",
+        "As in the previous problem",
+        "Follow this pattern",
+        "You are expected",
+    ]
+    cleaned_lines = []
+    for raw_line in text.splitlines():
+        raw_line = raw_line.rstrip()
+        line = " ".join(raw_line.split())
+        if not line:
+            continue
+
+        cut_at = None
+        for marker in annotation_markers:
+            idx = raw_line.find(marker)
+            if idx == 0:
+                cut_at = 0
+                break
+            if idx > 0 and re.search(r"\s{2,}$", raw_line[:idx]):
+                # Side-column comments are separated from note text by PDF layout spacing.
+                cut_at = idx if cut_at is None else min(cut_at, idx)
+
+        if cut_at == 0:
+            continue
+        if cut_at is not None:
+            line = " ".join(raw_line[:cut_at].split())
+
+        line = re.sub(r"\s+(onset|character|location|radiation|duration)$", "", line, flags=re.IGNORECASE)
+
+        # Remove short standalone teaching labels that survive extraction.
+        if line.lower() == "history and physical examination comments":
+            continue
+        if line.lower() in {"onset", "character", "location", "radiation", "duration"}:
+            continue
+        if line:
+            cleaned_lines.append(line)
+
+    return "\n".join(cleaned_lines).strip()
+
+
+def _as_list(value) -> list:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def render_list_items(items, empty_text: str = "Not specified in the report.") -> None:
+    items = [str(item).strip() for item in _as_list(items) if str(item).strip()]
+    if not items:
+        st.caption(empty_text)
+        return
+    for item in items:
+        st.markdown(f"- {item}")
+
+
+def render_report_analysis(analysis: dict, report_text: str) -> None:
+    snapshot = analysis.get("patient_snapshot") or {}
+    if not isinstance(snapshot, dict):
+        snapshot = {"summary": str(snapshot)}
+
+    st.markdown("### Board briefing")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Age", str(snapshot.get("age", "N/A")))
+    c2.metric("Sex", str(snapshot.get("sex", "N/A")))
+    c3.metric("Pages read", str(report_text.count("Page ")))
+    c4.metric("Problems", str(len(_as_list(analysis.get("priority_problems")))))
+
+    st.markdown(
+        f"""
+        <article class="summary-panel">
+          <div class="summary-header">
+            <h3>{str(snapshot.get("name_or_id", "Uploaded report"))}</h3>
+            <span>Board view</span>
+          </div>
+          <section class="summary-section">
+            <h4>Presenting problem</h4>
+            <p>{str(snapshot.get("presenting_problem", "Not specified in the report."))}</p>
+          </section>
+          <section class="summary-section">
+            <h4>Likely primary issue</h4>
+            <p>{str(snapshot.get("likely_primary_issue", "Not specified in the report."))}</p>
+          </section>
+          <section class="summary-section">
+            <h4>Meeting objective</h4>
+            <p>{str(analysis.get("meeting_objective", "Clarify the key clinical decision for this case."))}</p>
+          </section>
+        </article>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    tab_signal, tab_team, tab_agenda, tab_source = st.tabs(
+        ["Clinical signal", "Team focus", "Meeting agenda", "Source text"]
+    )
+
+    with tab_signal:
+        left, right = st.columns([0.52, 0.48])
+        with left:
+            st.markdown("#### Critical facts")
+            render_list_items(analysis.get("critical_facts"))
+            st.markdown("#### Red flags")
+            render_list_items(analysis.get("red_flags"), "No urgent red flags were extracted.")
+        with right:
+            st.markdown("#### Missing data")
+            render_list_items(analysis.get("missing_data"), "No missing data was extracted.")
+
+        problems = _as_list(analysis.get("priority_problems"))
+        rows = [p for p in problems if isinstance(p, dict)]
+        if rows:
+            st.markdown("#### Priority problem table")
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        else:
+            st.markdown("#### Priority problems")
+            render_list_items(problems, "No priority problems were extracted.")
+
+    with tab_team:
+        focus = _as_list(analysis.get("specialist_focus"))
+        rows = [item for item in focus if isinstance(item, dict)]
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        else:
+            render_list_items(focus, "No specialist focus items were extracted.")
+
+        st.markdown("#### Decision points")
+        render_list_items(analysis.get("decision_points"))
+
+    with tab_agenda:
+        st.markdown("#### Suggested discussion order")
+        flow = [str(item).strip() for item in _as_list(analysis.get("meeting_flow")) if str(item).strip()]
+        if flow:
+            for idx, item in enumerate(flow, start=1):
+                st.markdown(f"**{idx}.** {item}")
+        else:
+            st.caption("No meeting flow was extracted.")
+
+    with tab_source:
+        st.text_area("Extracted report text", value=report_text[:30000], height=360)
+
+
+def page_report_intake(ollama_ok: bool) -> None:
+    st.subheader("Report intake")
+    st.caption("Upload a clinical PDF and convert it into a meeting-ready board briefing. MedGemma analyzes each section separately to reduce cutoff and improve completeness.")
+
+    if not ollama_ok:
+        st.warning("Start Ollama locally to enable report analysis.")
+
+    uploaded = st.file_uploader("Upload report PDF", type=["pdf"])
+    if not uploaded:
+        st.info("Upload a report to extract a patient snapshot, key facts, priority problems, specialist focus, and meeting agenda.")
+        return
+
+    try:
+        report_text = extract_pdf_text(uploaded)
+    except Exception as exc:
+        st.error(f"Could not read this PDF: {exc}")
+        return
+
+    if not report_text:
+        st.error("No readable text was found in this PDF.")
+        return
+
+    report_fingerprint = hashlib.sha256(report_text.encode("utf-8")).hexdigest()
+    if st.session_state.get("report_fingerprint") != report_fingerprint:
+        st.session_state.pop("report_analysis", None)
+        st.session_state.pop("report_text", None)
+        st.session_state["report_fingerprint"] = report_fingerprint
+
+    st.success(f"Extracted {len(report_text):,} characters from {uploaded.name}.")
+
+    button_label = "Regenerate board briefing" if st.session_state.get("report_analysis") else "Generate board briefing"
+    if st.button(button_label, type="primary", disabled=not ollama_ok):
+        try:
+            st.session_state["report_analysis"] = analyze_report_with_loader(report_text)
+            st.session_state["report_text"] = report_text
+            st.session_state["report_name"] = uploaded.name
+            st.session_state["report_fingerprint"] = report_fingerprint
+        except Exception as exc:
+            st.error(f"Report analysis failed: {exc}")
+
+    if st.session_state.get("report_analysis") and st.session_state.get("report_text"):
+        render_report_analysis(st.session_state["report_analysis"], st.session_state["report_text"])
 
 
 def render_ollama_status_light(ollama_ok: bool) -> None:
@@ -730,8 +1033,8 @@ def page_synthetic_intake(df: pd.DataFrame, ollama_ok: bool) -> None:
 
 def main() -> None:
     st.set_page_config(
-        page_title="Tumor Board Assist",
-        page_icon="🏥",
+        page_title="OncoBoard",
+        page_icon="OB",
         layout="wide",
         initial_sidebar_state="expanded",
     )
@@ -748,9 +1051,14 @@ def main() -> None:
         st.markdown(
             """
             <div class="app-titlebar">
-              <div class="product-kicker">Local MedGemma MDT workspace</div>
-              <h2>Tumor Board Assist</h2>
-              <p>Multidisciplinary oncology review workspace</p>
+              <div class="brand-lockup">
+                <div class="brand-mark">OB</div>
+                <div>
+                  <div class="product-kicker">Local MedGemma MDT workspace</div>
+                  <h2>OncoBoard</h2>
+                  <p>Multidisciplinary oncology review workspace</p>
+                </div>
+              </div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -770,6 +1078,8 @@ def main() -> None:
         page_home(df)
     elif nav == "Patients":
         page_patient_chart(df, ollama_ok)
+    elif nav == "Report intake":
+        page_report_intake(ollama_ok)
     elif nav == "Add patient":
         page_add_patient(df)
     else:

@@ -240,6 +240,50 @@ def inject_styles() -> None:
             color: var(--muted);
             font-size: 0.92rem;
           }
+          .brand-lockup {
+            display: flex;
+            align-items: center;
+            gap: 0.82rem;
+            position: relative;
+            z-index: 1;
+          }
+          .brand-mark {
+            width: 2.75rem;
+            height: 2.75rem;
+            flex: 0 0 2.75rem;
+            border-radius: 12px;
+            display: grid;
+            place-items: center;
+            color: #ffffff;
+            font-weight: 900;
+            font-size: 0.88rem;
+            letter-spacing: 0.03em;
+            background:
+              radial-gradient(circle at 28% 20%, rgba(255,255,255,0.34), transparent 28%),
+              linear-gradient(135deg, var(--brand), var(--teal) 62%, var(--gold));
+            box-shadow: 0 14px 28px rgba(31, 138, 131, 0.22);
+            border: 1px solid rgba(255,255,255,0.32);
+            position: relative;
+            overflow: hidden;
+          }
+          .brand-mark::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(110deg, transparent, rgba(255,255,255,0.32), transparent);
+            transform: translateX(-120%);
+            animation: shimmerLine 6s ease-in-out infinite;
+          }
+          .hero-brand {
+            align-items: flex-start;
+          }
+          .hero-brand .brand-mark {
+            width: 3.15rem;
+            height: 3.15rem;
+            flex-basis: 3.15rem;
+            border-radius: 14px;
+            font-size: 1rem;
+          }
           .product-kicker {
             color: var(--teal);
             font-weight: 800;
@@ -940,10 +984,7 @@ def inject_styles() -> None:
 
 
 def render_footer() -> None:
-    st.markdown(
-        f'<div class="platform-footer">MedGemma 1.5 4B · Synthetic training data only · Not for clinical use</div>',
-        unsafe_allow_html=True,
-    )
+    return None
 
 
 def render_profile_hero(row) -> None:

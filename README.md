@@ -1,4 +1,4 @@
-# Tumor Board AI Starter
+# OncoBoard
 
 Local prototype for using Ollama + MedGemma 1.5 4B to summarize synthetic oncology patients for MDT/tumor board review.
 
@@ -28,7 +28,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-**Tumor Board Assist** includes:
+**OncoBoard** includes:
 
 - **Patient chart** — per-patient profile and MDT brief generation
 - **Add patient** — manual text intake (structured fields + clinical narrative)
