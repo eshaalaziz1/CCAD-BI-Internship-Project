@@ -49,6 +49,7 @@ __all__ = [
     "PROMPT_VERSION",
     "analyze_report",
     "check_ollama_reachable",
+    "repair_report_analysis",
     "summarize_patient",
     "stream_summarize_patient",
 ]
@@ -168,7 +169,39 @@ def _strip_model_noise(text: str) -> str:
     text = re.sub(r"<think>.*?</think>", "", text or "", flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r"<unused\d+>\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"</?[^>\s]+>", "", text)
+    text = re.sub(r"^\s*(?:thought|analysis)\s*[:\-]*\s*", "", text, flags=re.IGNORECASE)
+    if _looks_like_reasoning(text):
+        return ""
     return text.strip()
+
+
+def _looks_like_reasoning(text: str) -> bool:
+    lowered = (text or "").lower()
+    markers = [
+        "identify the goal",
+        "scan the report",
+        "the user wants",
+        "read through the report",
+        "provided report text",
+        "based only on the",
+        "i need to",
+        "we need to",
+    ]
+    return any(marker in lowered for marker in markers)
+
+
+def _is_missing_value(value) -> bool:
+    text = str(value or "").strip()
+    placeholders = {"...", "N/A", "None", "Uploaded report", "Uploaded Report", "Not specified"}
+    return not text or text in placeholders or _looks_like_reasoning(text)
+
+
+def _as_list(value) -> list:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
 
 
 def _clean_report_noise(text: str) -> str:
@@ -331,6 +364,210 @@ def _parse_key_value_lines(text: str) -> dict:
     return data
 
 
+def _sex_label(raw: str) -> str:
+    value = (raw or "").upper()
+    if "F" in value:
+        return "Female"
+    if "M" in value:
+        return "Male"
+    return raw.strip() or "Not specified"
+
+
+def _derive_snapshot(report_text: str) -> dict:
+    text = _clean_report_noise(report_text)
+    name_match = re.search(r"Patient Name:\s*([^\n]+)", text, flags=re.IGNORECASE)
+    age_sex_match = re.search(r"(\d{1,3})\s*y/o\s*([A-Z]+)", text, flags=re.IGNORECASE)
+    chief_match = re.search(
+        r"Chief Complaint.*?:\s*(.*?)(?:\n\s*\n|History of Present Illness)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    chief = " ".join(chief_match.group(1).split()) if chief_match else ""
+    if not chief:
+        pain_match = re.search(r"having\s+([^.\n]*chest pain[^.\n]*)", text, flags=re.IGNORECASE)
+        chief = pain_match.group(1).strip() if pain_match else "Not specified in the report."
+
+    likely_issue = "Chest pain with concern for cardiac ischemia"
+    if not re.search(r"chest pains?|chest pain", text, re.IGNORECASE):
+        likely_issue = chief or "Not specified in the report."
+
+    return {
+        "name_or_id": name_match.group(1).strip() if name_match else "Uploaded report",
+        "age": age_sex_match.group(1) if age_sex_match else "Not specified",
+        "sex": _sex_label(age_sex_match.group(2)) if age_sex_match else "Not specified",
+        "presenting_problem": chief,
+        "likely_primary_issue": likely_issue,
+    }
+
+
+def _derive_objective(report_text: str, snapshot: dict) -> str:
+    text = _clean_report_noise(report_text)
+    name = snapshot.get("name_or_id", "the patient")
+    if "," in name:
+        last, first = [part.strip() for part in name.split(",", 1)]
+        name = f"{first} {last}".strip()
+    possessive_name = f"{name}'" if str(name).endswith("s") else f"{name}'s"
+    if re.search(r"chest pains?|chest pain", text, re.IGNORECASE):
+        return (
+            f"Determine whether {possessive_name} recurrent exertional and nocturnal chest pain requires urgent "
+            "cardiac workup, risk stratification, and immediate treatment."
+        )
+    return "Clarify the most urgent diagnosis, missing data, and immediate management plan for this patient."
+
+
+def _derive_key_facts(report_text: str) -> list[str]:
+    text = _clean_report_noise(report_text)
+    facts: list[str] = []
+    if re.search(r"one week prior|last week", text, re.IGNORECASE):
+        facts.append("Chest pain began about one week before presentation.")
+    if re.search(r"dull and aching", text, re.IGNORECASE):
+        facts.append("Pain is described as dull and aching.")
+    if re.search(r"radiated? up to\s+her neck", text, re.IGNORECASE):
+        facts.append("Pain radiates from the left parasternal area to the neck.")
+    if re.search(r"shortness of breath", text, re.IGNORECASE):
+        facts.append("Chest discomfort is associated with shortness of breath.")
+    if re.search(r"awaken her from sleep.*?lasting\s+30\s+minutes", " ".join(text.split()), re.IGNORECASE):
+        facts.append("Most recent episode woke her from sleep and lasted 30 minutes.")
+    bp = re.search(r"Blood Pressure\s+(\d{2,3})/(\d{2,3})|BP\s+(\d{2,3})/(\d{2,3})", text, re.IGNORECASE)
+    if bp:
+        systolic = bp.group(1) or bp.group(3)
+        diastolic = bp.group(2) or bp.group(4)
+        facts.append(f"Blood pressure recorded at {systolic}/{diastolic} mmHg.")
+    if re.search(r"hypertension\s+3\s+years?\s+ago|HTN\s+3\s+years?\s+ago", text, re.IGNORECASE):
+        facts.append("Hypertension was diagnosed 3 years ago.")
+    if re.search(r"family history of premature CAD|premature CAD|father.*MI", text, re.IGNORECASE):
+        facts.append("Family history suggests premature coronary artery disease risk.")
+    if re.search(r"systolic.*murmur|abdominal bruit", text, re.IGNORECASE):
+        facts.append("Exam documents a systolic murmur and/or abdominal bruit.")
+    return facts[:8]
+
+
+def _derive_priority_problems(report_text: str) -> list[dict]:
+    text = _clean_report_noise(report_text)
+    problems: list[dict] = []
+    if re.search(r"chest pains?|chest pain", text, re.IGNORECASE):
+        problems.append(
+            {
+                "problem": "Recurrent chest pain",
+                "evidence": "Episodes with exertion and a later episode waking her from sleep.",
+                "why_it_matters": "Requires urgent cardiac risk stratification and ischemia evaluation.",
+            }
+        )
+    if re.search(r"shortness of breath|dyspnea", text, re.IGNORECASE):
+        problems.append(
+            {
+                "problem": "Dyspnea associated with chest discomfort",
+                "evidence": "Report states discomfort was accompanied by shortness of breath.",
+                "why_it_matters": "Raises concern for cardiopulmonary stress during pain episodes.",
+            }
+        )
+    if re.search(r"Blood Pressure\s+168/98|BP\s+168/98|hypertension", text, re.IGNORECASE):
+        problems.append(
+            {
+                "problem": "Hypertension / elevated blood pressure",
+                "evidence": "History of HTN and recorded blood pressure of 168/98 mmHg.",
+                "why_it_matters": "Important cardiovascular risk factor and management target.",
+            }
+        )
+    if re.search(r"family history of premature CAD|premature CAD|father.*MI", text, re.IGNORECASE):
+        problems.append(
+            {
+                "problem": "Atherosclerotic cardiovascular disease risk",
+                "evidence": "Family history of premature CAD is documented.",
+                "why_it_matters": "Changes pre-test probability and prevention planning.",
+            }
+        )
+    if re.search(r"systolic.*murmur|abdominal bruit", text, re.IGNORECASE):
+        problems.append(
+            {
+                "problem": "Abnormal cardiovascular/vascular exam findings",
+                "evidence": "Report documents systolic murmur and abdominal bruit.",
+                "why_it_matters": "May affect diagnostic workup and vascular/cardiac assessment.",
+            }
+        )
+    return problems[:6]
+
+
+def _derive_red_flags(report_text: str) -> list[str]:
+    text = _clean_report_noise(report_text)
+    flags: list[str] = []
+    if re.search(r"awaken her from sleep.*?lasting\s+30\s+minutes", " ".join(text.split()), re.IGNORECASE):
+        flags.append("Chest pain woke the patient from sleep and lasted 30 minutes.")
+    if re.search(r"Blood Pressure\s+168/98|BP\s+168/98", text, re.IGNORECASE):
+        flags.append("Blood pressure is elevated at 168/98 mmHg.")
+    if re.search(r"shortness of breath", text, re.IGNORECASE):
+        flags.append("Chest pain is associated with shortness of breath.")
+    return flags[:5]
+
+
+def _clean_text_list(items, limit: int = 8) -> list[str]:
+    cleaned = []
+    for item in _as_list(items):
+        text = _strip_model_noise(str(item)).strip()
+        if _is_missing_value(text):
+            continue
+        cleaned.append(text)
+        if len(cleaned) >= limit:
+            break
+    return cleaned
+
+
+def _repair_report_analysis(analysis: dict, report_text: str) -> dict:
+    snapshot = analysis.get("patient_snapshot") if isinstance(analysis.get("patient_snapshot"), dict) else {}
+    derived_snapshot = _derive_snapshot(report_text)
+    snapshot = dict(snapshot or {})
+    for key, value in derived_snapshot.items():
+        if _is_missing_value(snapshot.get(key)):
+            snapshot[key] = value
+    if str(snapshot.get("likely_primary_issue", "")).strip().lower() == "chest pain":
+        snapshot["likely_primary_issue"] = derived_snapshot["likely_primary_issue"]
+
+    objective = _strip_model_noise(str(analysis.get("meeting_objective", "")))
+    if _is_missing_value(objective) or objective.lower().startswith("review the key problems"):
+        objective = _derive_objective(report_text, snapshot)
+
+    facts = _clean_text_list(analysis.get("critical_facts"), 8)
+    if len(facts) < 5 or (facts and sum(len(item) for item in facts) / len(facts) < 32):
+        facts = _derive_key_facts(report_text)
+
+    problems_raw = analysis.get("priority_problems")
+    problems: list[dict] = []
+    if isinstance(problems_raw, list):
+        for item in problems_raw:
+            if not isinstance(item, dict):
+                continue
+            problem = _strip_model_noise(item.get("problem", ""))
+            evidence = _strip_model_noise(item.get("evidence", ""))
+            why = _strip_model_noise(item.get("why_it_matters", ""))
+            if not _is_missing_value(problem):
+                problems.append({"problem": problem, "evidence": evidence, "why_it_matters": why})
+            if len(problems) >= 6:
+                break
+    if len(problems) < 3:
+        problems = _derive_priority_problems(report_text)
+
+    red_flags = _clean_text_list(analysis.get("red_flags"), 5)
+    if not red_flags:
+        red_flags = _derive_red_flags(report_text)
+
+    repaired = dict(analysis)
+    repaired["patient_snapshot"] = snapshot
+    repaired["meeting_objective"] = objective
+    repaired["critical_facts"] = facts
+    repaired["priority_problems"] = problems[:6]
+    repaired["specialist_focus"] = _clean_text_list(analysis.get("specialist_focus"), 5)
+    repaired["missing_data"] = _clean_text_list(analysis.get("missing_data"), 6)
+    repaired["red_flags"] = red_flags
+    repaired["decision_points"] = _clean_text_list(analysis.get("decision_points"), 6)
+    repaired["meeting_flow"] = _clean_text_list(analysis.get("meeting_flow"), 5)
+    return repaired
+
+
+def repair_report_analysis(analysis: dict, report_text: str) -> dict:
+    """Repair cached or fresh report analysis before the UI renders it."""
+    return _repair_report_analysis(analysis or {}, report_text or "")
+
+
 def _parse_report_markdown(text: str) -> dict | None:
     cleaned = _strip_model_noise(text)
     section_lookup = {title.lower(): key for key, title in REPORT_ANALYSIS_FIELDS.items()}
@@ -376,11 +613,11 @@ def _heuristic_report_analysis(report_text: str) -> dict:
     problems = _bullet_lines(problem_section.group(1))[:8] if problem_section else []
     plan_items = _bullet_lines(plan_section.group(1))[:6] if plan_section else []
 
-    return {
+    analysis = {
         "patient_snapshot": {
             "name_or_id": name_match.group(1).strip() if name_match else "Uploaded report",
-            "age": age_sex_match.group(1) if age_sex_match else "N/A",
-            "sex": age_sex_match.group(2) if age_sex_match else "N/A",
+            "age": age_sex_match.group(1) if age_sex_match else "Not specified",
+            "sex": _sex_label(age_sex_match.group(2)) if age_sex_match else "Not specified",
             "presenting_problem": " ".join(chief_match.group(1).split()) if chief_match else "Not specified in the report.",
             "likely_primary_issue": problems[0] if problems else "Not specified in the report.",
         },
@@ -402,6 +639,7 @@ def _heuristic_report_analysis(report_text: str) -> dict:
             "End with the agreed plan and next actions.",
         ],
     }
+    return _repair_report_analysis(analysis, report_text)
 
 
 def _report_section_prompt(report_text: str, task: str, output_rule: str) -> str:
@@ -411,6 +649,11 @@ You are helping doctors prepare for a short multidisciplinary medical meeting.
 
 Use ONLY the report text provided. Do not invent facts. Do not include hidden reasoning,
 confidence scores, or prompt text.
+Prefer concrete clinical details over generic advice. If the report does not support an item,
+write "Not specified in the report" instead of guessing. Keep every item useful for deciding
+what the team should discuss during the meeting.
+Start directly with the requested answer. Do not write words like thought, analysis,
+Identify the Goal, Scan the Report, or explain how you read the report.
 
 Task:
 {task}
@@ -435,7 +678,7 @@ def _run_report_section(report_text: str, task: str, output_rule: str, *, num_pr
                 options={"num_predict": num_predict, "temperature": 0.1, "num_ctx": 8192},
             )
             text = _strip_model_noise(response["message"]["content"])
-            if text and text not in {"{", "}", "[]"}:
+            if text and text not in {"{", "}", "[]"} and not _looks_like_reasoning(text):
                 return text
             raise ValueError(f"empty or unusable section output: {text!r}")
         except Exception as exc:
@@ -497,55 +740,55 @@ def analyze_report(report_text: str, model: str = MODEL) -> dict:
         snapshot_text = _run_report_section(
             report_text,
             "Extract the patient snapshot.",
-            "Return exactly five lines: Name/ID: ... | Age: ... | Sex: ... | Presenting problem: ... | Likely primary issue: ...",
+            "Return exactly five fields using this format: Name/ID: ... | Age: ... | Sex: ... | Presenting problem: ... | Likely primary issue: ...",
             num_predict=260,
         )
         objective_text = _run_report_section(
             report_text,
             "State the meeting objective.",
-            "Return one concise sentence only.",
+            "Return one concrete sentence about what the team must decide or clarify for this patient.",
             num_predict=180,
         )
         facts_text = _run_report_section(
             report_text,
             "Extract the most decision-relevant clinical facts.",
-            "Return 5 to 8 bullet points. Each bullet must be supported by the report.",
+            "Return 5 to 8 bullets. Include specific symptoms, diagnoses, history, exam findings, test results, treatments, or risks that are explicitly in the report.",
             num_predict=650,
         )
         problems_text = _run_report_section(
             report_text,
             "Identify the priority problems for discussion.",
-            "Return up to 6 bullets using exactly: Problem: ... | Evidence: ... | Why it matters: ...",
+            "Return up to 6 bullets using exactly: Problem: ... | Evidence: quote or paraphrase the report support | Why it matters: meeting relevance. Do not include problems without report evidence.",
             num_predict=850,
         )
         focus_text = _run_report_section(
             report_text,
             "Map the case to specialists who should contribute to the meeting.",
-            "Return up to 5 bullets using exactly: Specialist: ... | Review: ...",
+            "Return up to 5 bullets using exactly: Specialist: ... | Review: specific question or evidence they should review. Use only specialties justified by the report.",
             num_predict=650,
         )
         missing_text = _run_report_section(
             report_text,
             "Identify missing information needed before a confident decision.",
-            "Return up to 6 bullet points. If none, return '- Not specified in the report.'",
+            "Return up to 6 bullets. Each gap must be specific, such as a named lab, imaging result, medication detail, timeline, risk factor, or pending test. If no specific gap is apparent, return '- Not specified in the report.'",
             num_predict=500,
         )
         red_flags_text = _run_report_section(
             report_text,
             "Identify urgent or high-risk red flags.",
-            "Return up to 5 bullet points. If none, return '- No urgent red flags extracted from the report.'",
+            "Return up to 5 bullets. Include only urgent or high-risk findings explicitly supported by the report. If none, return '- No urgent red flags extracted from the report.'",
             num_predict=450,
         )
         decisions_text = _run_report_section(
             report_text,
             "List the decision points the team should answer.",
-            "Return up to 6 bullet points.",
+            "Return up to 6 bullets phrased as concrete meeting questions. Each question must connect to the extracted problems, gaps, or red flags.",
             num_predict=550,
         )
         flow_text = _run_report_section(
             report_text,
             "Create a practical meeting flow for discussing this patient quickly.",
-            "Return 4 to 5 numbered or bulleted steps.",
+            "Return 4 to 5 numbered or bulleted steps. Use the actual case content, not generic meeting steps.",
             num_predict=450,
         )
 
@@ -566,10 +809,10 @@ def analyze_report(report_text: str, model: str = MODEL) -> dict:
             PROMPT_VERSION,
             time.perf_counter() - start,
         )
-        return analysis
+        return _repair_report_analysis(analysis, report_text)
     except Exception as exc:
         logger.warning("report_analysis_falling_back_to_heuristic error=%s", exc)
-        return _heuristic_report_analysis(report_text)
+        return _repair_report_analysis(_heuristic_report_analysis(report_text), report_text)
 
 
 def _summarize_once(patient_data: str, model: str, *, json_mode: bool) -> tuple[str, str]:

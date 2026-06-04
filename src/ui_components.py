@@ -768,6 +768,197 @@ def inject_styles() -> None:
             font-size: 0.96rem;
             line-height: 1.58;
           }
+          .report-brief-hero {
+            position: relative;
+            margin: 1rem 0 1.1rem;
+            padding: 1.35rem;
+            border-radius: 18px;
+            border: 1px solid rgba(132, 161, 185, 0.32);
+            background:
+              linear-gradient(135deg, rgba(255,255,255,0.96), rgba(241,248,252,0.9)),
+              radial-gradient(circle at 90% 8%, rgba(31,138,131,0.14), transparent 18rem);
+            box-shadow: 0 24px 60px rgba(31, 53, 72, 0.14);
+            overflow: hidden;
+            animation: fadeUp 260ms ease-out both;
+          }
+          .report-brief-hero::before {
+            content: "";
+            position: absolute;
+            inset: 0 auto 0 0;
+            width: 7px;
+            background: linear-gradient(180deg, var(--teal), var(--brand-2), var(--gold));
+          }
+          .report-brief-top {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 1rem;
+            align-items: start;
+            padding-left: 0.15rem;
+          }
+          .report-eyebrow {
+            margin: 0 0 0.3rem;
+            color: var(--brand-2);
+            font-size: 0.78rem;
+            font-weight: 900;
+            letter-spacing: 0.09em;
+            text-transform: uppercase;
+          }
+          .report-brief-top h2 {
+            margin: 0;
+            color: var(--ink);
+            font-size: clamp(1.7rem, 3vw, 2.45rem);
+            line-height: 1.05;
+            letter-spacing: 0;
+          }
+          .report-chip-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-top: 0.75rem;
+          }
+          .report-chip-row span {
+            display: inline-flex;
+            align-items: center;
+            min-height: 2rem;
+            padding: 0.35rem 0.7rem;
+            border-radius: 999px;
+            background: #eaf3f7;
+            color: #29475f;
+            border: 1px solid #d5e4ee;
+            font-size: 0.84rem;
+            font-weight: 800;
+          }
+          .report-risk-stack {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(5.7rem, 1fr));
+            gap: 0.6rem;
+          }
+          .report-risk-stack div {
+            border-radius: 14px;
+            background: rgba(255,255,255,0.82);
+            border: 1px solid #d9e4ef;
+            padding: 0.75rem 0.8rem;
+            text-align: center;
+            box-shadow: 0 12px 24px rgba(37, 94, 126, 0.08);
+          }
+          .report-risk-stack b {
+            display: block;
+            color: var(--brand);
+            font-size: 1.35rem;
+            line-height: 1;
+          }
+          .report-risk-stack span {
+            display: block;
+            margin-top: 0.35rem;
+            color: var(--muted);
+            font-size: 0.72rem;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+          }
+          .report-brief-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 0.85rem;
+            margin-top: 1.1rem;
+          }
+          .report-brief-grid article,
+          .meeting-objective-card {
+            border: 1px solid rgba(209, 224, 235, 0.95);
+            border-radius: 14px;
+            background: rgba(255,255,255,0.76);
+            padding: 1rem;
+          }
+          .report-brief-grid span,
+          .meeting-objective-card span {
+            display: block;
+            margin-bottom: 0.45rem;
+            color: var(--brand);
+            font-size: 0.75rem;
+            font-weight: 900;
+            letter-spacing: 0.07em;
+            text-transform: uppercase;
+          }
+          .report-brief-grid p,
+          .meeting-objective-card p {
+            margin: 0;
+            color: var(--ink);
+            font-size: 1rem;
+            line-height: 1.55;
+          }
+          .meeting-objective-card {
+            margin-top: 0.85rem;
+            border-color: rgba(184, 128, 32, 0.32);
+            background: linear-gradient(135deg, rgba(255,251,235,0.85), rgba(255,255,255,0.86));
+          }
+          .problem-card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 0.85rem;
+            margin: 0.7rem 0 1rem;
+          }
+          .problem-card {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr);
+            gap: 0.8rem;
+            border: 1px solid rgba(209, 224, 235, 0.95);
+            border-radius: 14px;
+            background: rgba(255,255,255,0.84);
+            padding: 0.95rem;
+            box-shadow: 0 14px 34px rgba(31, 53, 72, 0.09);
+            transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
+          }
+          .problem-card:hover {
+            transform: translateY(-2px);
+            border-color: rgba(37, 94, 126, 0.28);
+            box-shadow: 0 18px 40px rgba(31, 53, 72, 0.13);
+          }
+          .problem-card-index {
+            display: grid;
+            place-items: center;
+            width: 2rem;
+            height: 2rem;
+            border-radius: 999px;
+            background: linear-gradient(135deg, var(--brand), var(--teal));
+            color: #fff;
+            font-weight: 900;
+            box-shadow: 0 10px 20px rgba(37, 94, 126, 0.22);
+          }
+          .problem-card h4 {
+            margin: 0 0 0.55rem;
+            color: var(--ink);
+            font-size: 1rem;
+            line-height: 1.25;
+          }
+          .problem-card p {
+            margin: 0.42rem 0 0;
+            color: #41556b;
+            line-height: 1.48;
+            font-size: 0.88rem;
+          }
+          .problem-card p b {
+            display: block;
+            margin-bottom: 0.12rem;
+            color: var(--brand);
+            font-size: 0.72rem;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+          }
+          .measurement-grid {
+            align-items: stretch;
+          }
+          @media (max-width: 760px) {
+            .report-brief-top,
+            .report-brief-grid {
+              grid-template-columns: 1fr;
+            }
+            .report-risk-stack {
+              grid-template-columns: repeat(3, minmax(0, 1fr));
+            }
+            .report-risk-stack div {
+              padding: 0.65rem 0.45rem;
+            }
+          }
           .summary-section p {
             margin: 0;
           }

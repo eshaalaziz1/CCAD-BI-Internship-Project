@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import logging
 import os
 import re
@@ -29,6 +30,7 @@ from src.patients import (
 from src.summarizer import (
     analyze_report,
     check_ollama_reachable,
+    repair_report_analysis,
     summarize_patient,
 )
 from src.report_charts import render_report_charts
@@ -587,6 +589,11 @@ def _as_list(value) -> list:
 
 def render_list_items(items, empty_text: str = "Not specified in the report.") -> None:
     items = [str(item).strip() for item in _as_list(items) if str(item).strip()]
+    items = [
+        item
+        for item in items
+        if not re.search(r"\b(thought|identify the goal|scan the report|the user wants)\b", item, re.IGNORECASE)
+    ]
     if not items:
         st.caption(empty_text)
         return
@@ -594,44 +601,84 @@ def render_list_items(items, empty_text: str = "Not specified in the report.") -
         st.markdown(f"- {item}")
 
 
+def render_problem_cards(rows: list[dict]) -> None:
+    cards = []
+    for idx, row in enumerate(rows, start=1):
+        problem = html.escape(str(row.get("problem", row.get("Problem", "Priority problem"))))
+        evidence = html.escape(str(row.get("evidence", row.get("Evidence", "Not specified in the report."))))
+        why = html.escape(str(row.get("why_it_matters", row.get("Why it matters", row.get("why", "Review during meeting.")))))
+        cards.append(
+            f"""
+            <article class="problem-card">
+              <div class="problem-card-index">{idx}</div>
+              <div>
+                <h4>{problem}</h4>
+                <p><b>Evidence</b>{evidence}</p>
+                <p><b>Why it matters</b>{why}</p>
+              </div>
+            </article>
+            """
+        )
+    st.markdown(f"<div class='problem-card-grid'>{''.join(cards)}</div>", unsafe_allow_html=True)
+
+
 def render_report_analysis(analysis: dict, report_text: str) -> None:
+    analysis = repair_report_analysis(analysis, report_text)
     snapshot = analysis.get("patient_snapshot") or {}
     if not isinstance(snapshot, dict):
         snapshot = {"summary": str(snapshot)}
 
-    st.markdown("### Board briefing")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Age", str(snapshot.get("age", "N/A")))
-    c2.metric("Sex", str(snapshot.get("sex", "N/A")))
-    c3.metric("Pages read", str(report_text.count("Page ")))
-    c4.metric("Problems", str(len(_as_list(analysis.get("priority_problems")))))
+    name = str(snapshot.get("name_or_id", "Uploaded report"))
+    age = str(snapshot.get("age", "Not specified"))
+    sex = str(snapshot.get("sex", "Not specified"))
+    presenting_problem = str(snapshot.get("presenting_problem", "Not specified in the report."))
+    likely_issue = str(snapshot.get("likely_primary_issue", "Not specified in the report."))
+    objective = str(analysis.get("meeting_objective", "Clarify the key clinical decision for this case."))
+    page_count = report_text.count("Page ")
+    problem_count = len(_as_list(analysis.get("priority_problems")))
+    red_flag_count = len(_as_list(analysis.get("red_flags")))
+    missing_count = len(_as_list(analysis.get("missing_data")))
 
     st.markdown(
         f"""
-        <article class="summary-panel">
-          <div class="summary-header">
-            <h3>{str(snapshot.get("name_or_id", "Uploaded report"))}</h3>
-            <span>Board view</span>
+        <section class="report-brief-hero">
+          <div class="report-brief-top">
+            <div>
+              <p class="report-eyebrow">Board briefing</p>
+              <h2>{html.escape(name)}</h2>
+              <div class="report-chip-row">
+                <span>{html.escape(age)} yrs</span>
+                <span>{html.escape(sex)}</span>
+                <span>{page_count} pages read</span>
+              </div>
+            </div>
+            <div class="report-risk-stack">
+              <div><b>{problem_count}</b><span>Problems</span></div>
+              <div><b>{red_flag_count}</b><span>Red flags</span></div>
+              <div><b>{missing_count}</b><span>Gaps</span></div>
+            </div>
           </div>
-          <section class="summary-section">
-            <h4>Presenting problem</h4>
-            <p>{str(snapshot.get("presenting_problem", "Not specified in the report."))}</p>
-          </section>
-          <section class="summary-section">
-            <h4>Likely primary issue</h4>
-            <p>{str(snapshot.get("likely_primary_issue", "Not specified in the report."))}</p>
-          </section>
-          <section class="summary-section">
-            <h4>Meeting objective</h4>
-            <p>{str(analysis.get("meeting_objective", "Clarify the key clinical decision for this case."))}</p>
-          </section>
-        </article>
+          <div class="report-brief-grid">
+            <article>
+              <span>Presenting problem</span>
+              <p>{html.escape(presenting_problem)}</p>
+            </article>
+            <article>
+              <span>Likely primary issue</span>
+              <p>{html.escape(likely_issue)}</p>
+            </article>
+          </div>
+          <article class="meeting-objective-card">
+            <span>Meeting objective</span>
+            <p>{html.escape(objective)}</p>
+          </article>
+        </section>
         """,
         unsafe_allow_html=True,
     )
 
     tab_signal, tab_charts, tab_team, tab_agenda, tab_source = st.tabs(
-        ["Clinical signal", "Visual insights", "Team focus", "Meeting agenda", "Source text"]
+        ["Clinical signal", "Vitals & timeline", "Team focus", "Meeting agenda", "Source text"]
     )
 
     with tab_signal:
@@ -648,8 +695,8 @@ def render_report_analysis(analysis: dict, report_text: str) -> None:
         problems = _as_list(analysis.get("priority_problems"))
         rows = [p for p in problems if isinstance(p, dict)]
         if rows:
-            st.markdown("#### Priority problem table")
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.markdown("#### Priority problems")
+            render_problem_cards(rows)
         else:
             st.markdown("#### Priority problems")
             render_list_items(problems, "No priority problems were extracted.")
@@ -703,7 +750,7 @@ def page_report_intake(ollama_ok: bool) -> None:
         st.error("No readable text was found in this PDF.")
         return
 
-    report_fingerprint = hashlib.sha256(report_text.encode("utf-8")).hexdigest()
+    report_fingerprint = hashlib.sha256(f"{PROMPT_VERSION}\n{report_text}".encode("utf-8")).hexdigest()
     if st.session_state.get("report_fingerprint") != report_fingerprint:
         st.session_state.pop("report_analysis", None)
         st.session_state.pop("report_text", None)
@@ -711,8 +758,9 @@ def page_report_intake(ollama_ok: bool) -> None:
 
     st.success(f"Extracted {len(report_text):,} characters from {uploaded.name}.")
 
+    action_col, reset_col = st.columns([0.72, 0.28])
     button_label = "Regenerate board briefing" if st.session_state.get("report_analysis") else "Generate board briefing"
-    if st.button(button_label, type="primary", disabled=not ollama_ok):
+    if action_col.button(button_label, type="primary", disabled=not ollama_ok, use_container_width=True):
         try:
             st.session_state["report_analysis"] = analyze_report_with_loader(report_text)
             st.session_state["report_text"] = report_text
@@ -721,8 +769,19 @@ def page_report_intake(ollama_ok: bool) -> None:
         except Exception as exc:
             st.error(f"Report analysis failed: {exc}")
 
+    if reset_col.button("Clear briefing", use_container_width=True):
+        st.session_state.pop("report_analysis", None)
+        st.session_state.pop("report_text", None)
+        st.rerun()
+
     if st.session_state.get("report_analysis") and st.session_state.get("report_text"):
-        render_report_analysis(st.session_state["report_analysis"], st.session_state["report_text"])
+        repaired_analysis = repair_report_analysis(
+            st.session_state["report_analysis"],
+            st.session_state["report_text"],
+        )
+        st.session_state["report_analysis"] = repaired_analysis
+        st.caption("Briefing checked against source text before display.")
+        render_report_analysis(repaired_analysis, st.session_state["report_text"])
 
 
 def render_ollama_status_light(ollama_ok: bool) -> None:
