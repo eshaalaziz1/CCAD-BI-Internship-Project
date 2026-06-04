@@ -33,6 +33,19 @@ from src.summarizer import (
     repair_report_analysis,
     summarize_patient,
 )
+from src.board_session import (
+    BOARD_STATUSES,
+    add_patients_to_board,
+    board_progress,
+    ensure_board_state,
+    get_active_patient_id,
+    move_case,
+    prune_board_queue,
+    remove_from_board,
+    row_for_patient_id,
+    set_active_index,
+    set_status,
+)
 from src.report_charts import render_report_charts
 from src.synthetic_generator import generate_synthetic_patient
 from src.ui_components import (
@@ -413,7 +426,14 @@ def sidebar_patient_picker(df: pd.DataFrame) -> pd.Series:
 
 
 def render_top_nav() -> str:
-    nav_options = ["Home", "Patients", "Report intake", "Add patient", "Synthetic intake"]
+    nav_options = [
+        "Home",
+        "Today's board",
+        "Patients",
+        "Report intake",
+        "Add patient",
+        "Synthetic intake",
+    ]
     st.session_state.setdefault("workspace_nav", nav_options[0])
     active = st.session_state["workspace_nav"]
 
@@ -431,6 +451,185 @@ def render_top_nav() -> str:
                 st.session_state["workspace_nav"] = option
                 st.rerun()
     return st.session_state["workspace_nav"]
+
+
+def _board_status_html(status: str) -> str:
+    css = status.lower().replace(" ", "")
+    return f'<span class="board-status-pill {css}">{status}</span>'
+
+
+def _go_to_patients_workspace(patient_id: str, df: pd.DataFrame) -> None:
+    row = row_for_patient_id(df, patient_id)
+    if row is not None:
+        st.session_state["selected_patient_label"] = patient_profile_label(row)
+    st.session_state["workspace_nav"] = "Patients"
+
+
+def page_todays_board(df: pd.DataFrame, ollama_ok: bool) -> None:
+    prune_board_queue(df)
+    ensure_board_state()
+
+    st.subheader("Today's board")
+    st.caption("Build your list, then step through cases with **Previous** and **Next**.")
+
+    total, discussed, remaining = board_progress()
+    m1, m2, m3 = st.columns(3)
+    m1.metric("On board", total)
+    m2.metric("Discussed", discussed)
+    m3.metric("Remaining", remaining)
+
+    with st.expander("Add cases to board", expanded=not st.session_state["board_queue"]):
+        label_to_id = {
+            patient_profile_label(row): str(row["patient_id"])
+            for _, row in df.iterrows()
+        }
+        on_board = set(st.session_state["board_queue"])
+        available = [label for label, pid in label_to_id.items() if pid not in on_board]
+        picked = st.multiselect(
+            "Select patients",
+            available,
+            placeholder="Choose cases for today's meeting…",
+            key="board_add_multiselect",
+        )
+        if st.button("Add to board", type="primary", disabled=not picked, use_container_width=True):
+            add_patients_to_board([label_to_id[label] for label in picked])
+            st.rerun()
+
+    if not st.session_state["board_queue"]:
+        st.info("No cases on the board yet. Use **Add cases to board** above.")
+        return
+
+    queue = st.session_state["board_queue"]
+    idx = st.session_state["board_active_idx"]
+    patient_id = get_active_patient_id()
+    row = row_for_patient_id(df, patient_id) if patient_id else None
+
+    queue_col, case_col = st.columns([0.32, 0.68], gap="large")
+
+    with queue_col:
+        st.markdown('<div class="board-panel">', unsafe_allow_html=True)
+        st.markdown("##### Case list")
+        for pid in queue:
+            case_row = row_for_patient_id(df, pid)
+            if case_row is None:
+                continue
+            is_active = pid == patient_id
+            status = st.session_state["board_status"].get(pid, "Queued")
+            st.markdown(
+                f"""
+                <div class="board-case{' active' if is_active else ''}">
+                  <div class="case-title">{pid}</div>
+                  <div class="case-meta">{case_row['diagnosis']} · stage {case_row['stage']}</div>
+                  <div style="margin-top:0.35rem;">{_board_status_html(status)}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        if patient_id:
+            up_col, down_col = st.columns(2)
+            with up_col:
+                if st.button("Move up", disabled=idx <= 0, use_container_width=True):
+                    move_case(patient_id, -1)
+                    st.rerun()
+            with down_col:
+                if st.button("Move down", disabled=idx >= len(queue) - 1, use_container_width=True):
+                    move_case(patient_id, 1)
+                    st.rerun()
+
+    with case_col:
+        if row is None:
+            st.warning("Selected case is no longer available.")
+            return
+
+        prev_col, count_col, next_col = st.columns([1, 1.2, 1])
+        with prev_col:
+            if st.button("← Previous", disabled=idx <= 0, use_container_width=True):
+                set_active_index(idx - 1)
+                st.rerun()
+        with count_col:
+            st.markdown(
+                f"<p style='text-align:center; color:#65748b; margin:0.55rem 0 0;'>"
+                f"Case <strong>{idx + 1}</strong> of <strong>{len(queue)}</strong></p>",
+                unsafe_allow_html=True,
+            )
+        with next_col:
+            if st.button("Next →", disabled=idx >= len(queue) - 1, use_container_width=True):
+                set_active_index(idx + 1)
+                st.rerun()
+
+        render_profile_hero(row)
+
+        current_status = st.session_state["board_status"].get(patient_id, "Queued")
+        new_status = st.selectbox(
+            "Case status",
+            BOARD_STATUSES,
+            index=list(BOARD_STATUSES).index(current_status),
+            key=f"board_status_{patient_id}",
+        )
+        if new_status != current_status:
+            set_status(patient_id, new_status)
+            st.rerun()
+
+        question = st.text_input(
+            "Discussion question",
+            value=st.session_state["board_questions"].get(patient_id, ""),
+            placeholder="What should the board decide today?",
+            key=f"board_question_{patient_id}",
+        )
+        st.session_state["board_questions"][patient_id] = question
+
+        render_patient_overview(row)
+
+        chart_col, remove_col = st.columns(2)
+        with chart_col:
+            if st.button("Open full patient chart", use_container_width=True):
+                _go_to_patients_workspace(patient_id, df)
+                st.rerun()
+        with remove_col:
+            if st.button("Remove from board", use_container_width=True):
+                remove_from_board(patient_id)
+                st.rerun()
+
+        with st.expander("MDT brief", expanded=False):
+            patient_data = format_patient_data(row)
+            fingerprint = record_fingerprint(patient_data)
+            meta = st.session_state.get("summary_meta", {})
+            summary = st.session_state.get("summary")
+            has_brief = (
+                summary
+                and meta.get("patient_id") == patient_id
+                and meta.get("fingerprint") == fingerprint
+                and meta.get("prompt_version") == PROMPT_VERSION
+            )
+            if has_brief:
+                display_summary(summary)
+            else:
+                st.caption("No brief loaded for this case yet.")
+            if ollama_ok:
+                if st.button("Generate MDT brief", type="primary", use_container_width=True):
+                    try:
+                        summary, from_cache, latency = load_summary(
+                            patient_id,
+                            patient_data,
+                            fingerprint,
+                            st.session_state.get(f"cache_bust_{patient_id}", 0),
+                            force_refresh=True,
+                        )
+                        st.session_state["summary"] = summary
+                        st.session_state["summary_meta"] = {
+                            "patient_id": patient_id,
+                            "fingerprint": fingerprint,
+                            "from_cache": from_cache,
+                            "latency_sec": latency,
+                            "prompt_version": PROMPT_VERSION,
+                        }
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Brief generation failed: {exc}")
+            else:
+                st.caption("Start Ollama to generate briefs.")
 
 
 def page_home(df: pd.DataFrame) -> None:
@@ -451,7 +650,7 @@ def page_home(df: pd.DataFrame) -> None:
           <div class="workflow-strip">
             <div class="workflow-step"><strong>Ingest</strong><span>Upload a long report and extract the decision-critical signal.</span></div>
             <div class="workflow-step"><strong>Review</strong><span>Scan patient context, problems, gaps, and specialty questions.</span></div>
-            <div class="workflow-step"><strong>Decide</strong><span>Use an MDT-ready agenda to move through cases faster.</span></div>
+            <div class="workflow-step"><strong>Decide</strong><span>Run cases from <strong>Today's board</strong> with Previous and Next.</span></div>
           </div>
         </div>
         """,
@@ -1136,9 +1335,13 @@ def main() -> None:
             sidebar_patient_picker(df)
             st.divider()
             st.caption("Use Prev/Next for fast case switching.")
+        elif nav == "Today's board":
+            st.caption("Add cases at the top of the page, then use Previous / Next.")
 
     if nav == "Home":
         page_home(df)
+    elif nav == "Today's board":
+        page_todays_board(df, ollama_ok)
     elif nav == "Patients":
         page_patient_chart(df, ollama_ok)
     elif nav == "Report intake":

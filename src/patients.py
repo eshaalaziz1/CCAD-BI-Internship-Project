@@ -85,6 +85,52 @@ def load_all_patients() -> pd.DataFrame:
     return pd.concat([builtin, custom], ignore_index=True)
 
 
+def _scalar_value(value) -> str | int | float | bool | None:
+    """Coerce list/array fields from LLM JSON into a single scalar for normalization."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, (list, tuple)):
+        parts = [_scalar_value(item) for item in value]
+        return "; ".join(str(part) for part in parts if part not in (None, ""))
+    try:
+        import numpy as np
+
+        if isinstance(value, np.ndarray):
+            flat = value.flatten().tolist()
+            return "; ".join(str(_scalar_value(item)) for item in flat if item is not None)
+    except ImportError:
+        pass
+    if hasattr(value, "item") and getattr(value, "ndim", 1) == 0:
+        return value.item()
+    return value
+
+
+def coerce_int(value, default: int = 0) -> int:
+    value = _scalar_value(value)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text:
+        return default
+    match = re.search(r"-?\d+", text)
+    return int(match.group()) if match else default
+
+
+def _field_text(value) -> str:
+    value = _scalar_value(value)
+    if value is None:
+        return ""
+    if isinstance(value, float) and pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
 def next_patient_id(df: pd.DataFrame) -> str:
     ids = df["patient_id"].astype(str)
     numbers = []
@@ -100,17 +146,15 @@ def normalize_record(record: dict, *, source: str) -> dict:
     row = {col: "" for col in PATIENT_COLUMNS}
     row.update({k: record.get(k, "") for k in record})
     row["source"] = source
-    row["patient_id"] = str(row["patient_id"]).strip()
-    row["age"] = int(row["age"]) if str(row["age"]).strip() else 0
-    row["ecog"] = int(row["ecog"]) if str(row["ecog"]).strip() else 0
-    row["sex"] = str(row["sex"]).strip().upper()[:1] or "U"
+    row["patient_id"] = _field_text(row["patient_id"])
+    row["age"] = coerce_int(row["age"], default=0)
+    row["ecog"] = min(4, max(0, coerce_int(row["ecog"], default=0)))
+    sex = _field_text(row["sex"]).upper()[:1]
+    row["sex"] = sex if sex in "FMU" else "U"
     for col in PATIENT_COLUMNS:
-        if col in ("patient_id", "age", "ecog", "source"):
+        if col in ("patient_id", "age", "ecog", "source", "sex"):
             continue
-        if pd.isna(row[col]):
-            row[col] = ""
-        else:
-            row[col] = str(row[col]).strip()
+        row[col] = _field_text(row[col])
     return row
 
 

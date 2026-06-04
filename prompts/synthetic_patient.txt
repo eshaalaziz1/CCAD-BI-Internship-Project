@@ -5,9 +5,15 @@ Requirements:
 - Include at least two items marked unknown, pending, or not yet available.
 - Values must be clinically plausible for the requested cancer type.
 
-Return ONLY valid JSON (no markdown fences) with exactly these keys:
+Return ONLY one valid JSON object (no markdown, no comments) with exactly these keys:
 patient_id, age, sex, diagnosis, stage, ecog, biomarkers, imaging, pathology,
 comorbidities, medications, pending_tests, prior_treatment, notes, intake_text
+
+Formatting rules:
+- Every value must be a JSON string or number (age and ecog are numbers).
+- Do NOT use line breaks inside string values.
+- Keep each clinical field concise (one or two short sentences max).
+- Escape any double quotes inside strings.
 
 Use patient_id "PNEW" as placeholder. sex must be F or M. ecog must be 0-4.
 intake_text should be a short free-text clinician note (2-4 sentences).

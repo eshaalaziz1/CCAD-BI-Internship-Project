@@ -1032,6 +1032,46 @@ def inject_styles() -> None:
             line-height: 1.45;
           }
 
+          .board-panel {
+            background: rgba(255,255,255,0.92);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            padding: 0.85rem 0.95rem;
+            box-shadow: var(--soft-shadow);
+          }
+          .board-case {
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            padding: 0.55rem 0.65rem;
+            margin-bottom: 0.45rem;
+            background: #fff;
+          }
+          .board-case.active {
+            border-color: var(--brand);
+            box-shadow: 0 0 0 1px rgba(37, 94, 126, 0.18);
+            background: #f7fbff;
+          }
+          .board-case .case-title {
+            font-weight: 700;
+            color: var(--brand);
+            font-size: 0.9rem;
+          }
+          .board-case .case-meta {
+            color: var(--muted);
+            font-size: 0.78rem;
+            margin-top: 0.15rem;
+          }
+          .board-status-pill {
+            display: inline-block;
+            padding: 0.12rem 0.5rem;
+            border-radius: 999px;
+            font-size: 0.72rem;
+            font-weight: 700;
+          }
+          .board-status-pill.queued { background: #e8f1f8; color: #255e7e; }
+          .board-status-pill.discussed { background: #d8f3dc; color: #1f6b42; }
+          .board-status-pill.deferred { background: #fff3cd; color: #8a6d1d; }
+
           @media (max-width: 800px) {
             .workflow-strip { grid-template-columns: 1fr; }
             .profile-hero h1 { font-size: 1.35rem; }
