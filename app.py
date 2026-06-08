@@ -14,6 +14,7 @@ from io import BytesIO
 
 import pandas as pd
 import streamlit as st
+from fpdf import FPDF
 from pypdf import PdfReader
 
 from src.constants import MODEL, PROMPT_VERSION
@@ -451,6 +452,27 @@ def summary_to_markdown(patient_id: str, summary: str) -> str:
             summary,
         ]
     )
+
+
+def summary_to_pdf(patient_id: str, summary: str) -> bytes:
+    text = summary_to_markdown(patient_id, summary)
+    safe_text = (
+        text.replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .encode("latin-1", errors="replace")
+        .decode("latin-1")
+    )
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=18)
+    pdf.set_margins(left=18, top=18, right=18)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.multi_cell(0, 9, f"OncoBoard MDT brief - {patient_id}")
+    pdf.ln(3)
+    pdf.set_font("Helvetica", "", 10)
+    for line in safe_text.splitlines():
+        pdf.multi_cell(0, 5.6, line or " ")
+    return bytes(pdf.output())
 
 
 def _sync_patient_ids(df: pd.DataFrame) -> dict[str, str]:
@@ -1244,23 +1266,40 @@ def render_list_items(items, empty_text: str = "Not specified in the report.") -
         st.markdown(f"- {item}")
 
 
+def _clean_card_text(value, fallback: str) -> str:
+    text = str(value or "").strip()
+    if not text or text.lower() in {"nan", "none", "..."}:
+        return fallback
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<unused\d+>\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"</?[^>\s]+>", "", text)
+    if re.search(r"\b(thought|identify the goal|scan the report|the user wants|i need to)\b", text, re.IGNORECASE):
+        return fallback
+    return " ".join(text.split())
+
+
 def render_problem_cards(rows: list[dict]) -> None:
     cards = []
     for idx, row in enumerate(rows, start=1):
-        problem = html.escape(str(row.get("problem", row.get("Problem", "Priority problem"))))
-        evidence = html.escape(str(row.get("evidence", row.get("Evidence", "Not specified in the report."))))
-        why = html.escape(str(row.get("why_it_matters", row.get("Why it matters", row.get("why", "Review during meeting.")))))
+        problem = html.escape(_clean_card_text(row.get("problem", row.get("Problem")), "Priority problem"))
+        evidence = html.escape(_clean_card_text(row.get("evidence", row.get("Evidence")), "Not specified in the report."))
+        why = html.escape(
+            _clean_card_text(
+                row.get("why_it_matters", row.get("Why it matters", row.get("why"))),
+                "Review during meeting.",
+            )
+        )
         cards.append(
-            f"""
-            <article class="problem-card">
-              <div class="problem-card-index">{idx}</div>
-              <div>
-                <h4>{problem}</h4>
-                <p><b>Evidence</b>{evidence}</p>
-                <p><b>Why it matters</b>{why}</p>
-              </div>
-            </article>
-            """
+            (
+                '<article class="problem-card">'
+                f'<div class="problem-card-index">{idx}</div>'
+                '<div>'
+                f'<h4>{problem}</h4>'
+                f'<p><b>Evidence</b>{evidence}</p>'
+                f'<p><b>Why it matters</b>{why}</p>'
+                '</div>'
+                '</article>'
+            )
         )
     st.markdown(f"<div class='problem-card-grid'>{''.join(cards)}</div>", unsafe_allow_html=True)
 
@@ -1937,12 +1976,24 @@ def page_patient_chart(df: pd.DataFrame, ollama_ok: bool) -> None:
             and meta.get("prompt_version") == PROMPT_VERSION
         ):
             display_summary(summary)
-            st.download_button(
-                "Export brief (Markdown)",
-                data=summary_to_markdown(patient_id, summary),
-                file_name=f"{patient_id}_mdt_brief.md",
-                mime="text/markdown",
-            )
+            brief_markdown = summary_to_markdown(patient_id, summary)
+            brief_pdf, brief_md = st.columns(2)
+            with brief_pdf:
+                st.download_button(
+                    "Export brief (PDF)",
+                    data=summary_to_pdf(patient_id, summary),
+                    file_name=f"{patient_id}_mdt_brief.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            with brief_md:
+                st.download_button(
+                    "Export brief (Markdown)",
+                    data=brief_markdown,
+                    file_name=f"{patient_id}_mdt_brief.md",
+                    mime="text/markdown",
+                    use_container_width=True,
+                )
 
 
 def page_add_patient(df: pd.DataFrame) -> None:

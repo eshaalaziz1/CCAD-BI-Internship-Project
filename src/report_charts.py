@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from html import escape
+from textwrap import dedent
 from typing import Any
 
 import pandas as pd
@@ -340,89 +341,92 @@ def render_measurement_cards(df: pd.DataFrame) -> None:
     for row in df.itertuples(index=False):
         bg, color = _status_style(row.Status)
         cards.append(
-            f"""
-            <div class="measurement-card" style="border-color:{color};">
-              <div class="measurement-card-top">
-                <span>{escape(str(row.Measurement))}</span>
-                <strong style="background:{bg}; color:{color};">{escape(str(row.Status))}</strong>
-              </div>
-              <div class="measurement-value">{row.Value:g}<small>{escape(str(row.Unit))}</small></div>
-              <div class="measurement-meta">
-                <span>Reference</span><b>{escape(str(row.Reference))}</b>
-              </div>
-              <div class="measurement-source">{escape(str(row.Source))}</div>
-            </div>
-            """
+            (
+                f'<div class="measurement-card" style="border-color:{color};">'
+                '<div class="measurement-card-top">'
+                f'<span>{escape(str(row.Measurement))}</span>'
+                f'<strong style="background:{bg}; color:{color};">{escape(str(row.Status))}</strong>'
+                '</div>'
+                f'<div class="measurement-value">{row.Value:g}<small>{escape(str(row.Unit))}</small></div>'
+                '<div class="measurement-meta">'
+                f'<span>Reference</span><b>{escape(str(row.Reference))}</b>'
+                '</div>'
+                f'<div class="measurement-source">{escape(str(row.Source))}</div>'
+                '</div>'
+            )
         )
 
     st.markdown(
-        f"""
+        dedent(
+            f"""
         <style>
           .measurement-grid {{
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-            gap: 0.85rem;
-            margin: 0.6rem 0 1.2rem;
+            grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+            gap: 0.55rem;
+            margin: 0.45rem 0 0.8rem;
           }}
           .measurement-card {{
             background: rgba(255,255,255,0.88);
             border: 1px solid;
             border-left-width: 5px;
-            border-radius: 14px;
-            padding: 1rem;
-            box-shadow: 0 12px 28px rgba(31, 41, 55, 0.08);
+            border-radius: 10px;
+            padding: 0.72rem 0.78rem;
+            min-height: 8.2rem;
+            box-shadow: 0 8px 18px rgba(31, 41, 55, 0.07);
           }}
           .measurement-card-top {{
             display: flex;
             justify-content: space-between;
             align-items: center;
-            gap: 0.75rem;
+            gap: 0.45rem;
             color: #334155;
-            font-size: 0.88rem;
+            font-size: 0.78rem;
             font-weight: 750;
           }}
           .measurement-card-top strong {{
             border-radius: 999px;
-            padding: 0.25rem 0.55rem;
-            font-size: 0.72rem;
+            padding: 0.18rem 0.42rem;
+            font-size: 0.66rem;
             white-space: nowrap;
           }}
           .measurement-value {{
-            margin-top: 0.75rem;
+            margin-top: 0.55rem;
             color: #0f172a;
-            font-size: 2rem;
+            font-size: 1.55rem;
             font-weight: 800;
             line-height: 1;
           }}
           .measurement-value small {{
-            margin-left: 0.35rem;
+            margin-left: 0.25rem;
             color: #64748b;
-            font-size: 0.82rem;
+            font-size: 0.72rem;
             font-weight: 650;
           }}
           .measurement-meta {{
             display: flex;
             justify-content: space-between;
-            gap: 0.75rem;
-            margin-top: 0.8rem;
+            gap: 0.45rem;
+            margin-top: 0.65rem;
             color: #64748b;
-            font-size: 0.8rem;
+            font-size: 0.7rem;
           }}
           .measurement-meta b {{
             color: #334155;
             text-align: right;
           }}
           .measurement-source {{
-            margin-top: 0.55rem;
+            margin-top: 0.42rem;
             color: #64748b;
-            font-size: 0.75rem;
+            font-size: 0.68rem;
             line-height: 1.35;
             overflow-wrap: anywhere;
             word-break: break-word;
           }}
         </style>
         <div class="measurement-grid">{''.join(cards)}</div>
-        """,
+        """
+        ).strip(),
         unsafe_allow_html=True,
     )
 

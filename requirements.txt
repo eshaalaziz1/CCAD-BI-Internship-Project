@@ -4,3 +4,4 @@ ollama>=0.3
 pypdf>=4.0
 plotly>=5.18
 fpdf2>=2.7
+reportlab>=4.2
