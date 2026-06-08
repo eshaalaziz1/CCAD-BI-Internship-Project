@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 
 import ollama
@@ -15,7 +16,9 @@ from src.summarizer import check_ollama_reachable
 
 ASSISTANT_SYSTEM = """You are an MDT clinical assistant for oncology tumor board review in OncoBoard.
 Use the patient context below for case-specific questions. If information is not in the context,
-say "Not found in chart" — do not guess. Phrase treatment ideas as possibilities, not final decisions.
+say "Not found in chart" and do not guess. Phrase treatment ideas as possibilities, not final decisions.
+Do not reveal chain-of-thought, hidden reasoning, analysis notes, planning steps, internal checklists,
+or tokens such as <unused94>, thought, analysis, or identify the core task.
 
 You can also answer questions about how to use OncoBoard (tabs, workflow, exporting minutes, etc.)
 using the app guide in the context. Do not invent clinical facts about patients when explaining the app."""
@@ -93,7 +96,63 @@ def _build_context(df: pd.DataFrame, patient_id: str, fallback_context: str) -> 
 
 
 def _assistant_prompt(user_message: str, context: str) -> str:
-    return f"{ASSISTANT_SYSTEM}\n\nContext:\n{context[:12000]}\n\nQuestion: {user_message}"
+    return (
+        f"{ASSISTANT_SYSTEM}\n\n"
+        "Return only the user-facing answer. Start directly with the answer.\n\n"
+        f"Context:\n{context[:12000]}\n\nQuestion: {user_message}"
+    )
+
+
+def _clean_assistant_reply(text: str) -> str:
+    cleaned = text or ""
+    cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"<unused\d+>\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^\s*(?:thought|analysis|reasoning)\s*[:\-]*\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"^\s*(?:the user wants|i need to|we need to|identify the core task|identify key information|scan the context).*?(?=\n\s*(?:[-*]\s+|\d+[.)]\s+|patient id|diagnosis|stage|summary|key facts|missing|recommendation)|$)",
+        "",
+        cleaned,
+        flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
+    cleaned = re.sub(
+        r"^\s*\d+[.)]\s*\*\?(?:identify|scan|construct|formulate|review|draft)[^:\n]*:?\*?\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"^\s*\d+[.)]\s*(?:identify|scan|construct|formulate|review|draft)[^:\n]*:?\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
+    answer_match = re.search(
+        r"(?:^|\n)\s*(?:final answer|answer|response)\s*[:\-]\s*(.+)",
+        cleaned,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if answer_match:
+        cleaned = answer_match.group(1)
+
+    reasoning_markers = [
+        "identify the core task",
+        "scan the context",
+        "the user wants",
+        "identify key information",
+        "provided patient context",
+        "construct the answer",
+        "formulate the response",
+    ]
+    lowered = cleaned.lower()
+    if any(marker in lowered for marker in reasoning_markers):
+        return (
+            "MedGemma returned internal reasoning instead of a usable assistant answer. "
+            "Please ask again, or try one of the quick prompts."
+        )
+
+    cleaned = re.sub(r"</?[^>\s]+>", "", cleaned)
+    return cleaned.strip()
 
 
 def _run_assistant_stream(user_message: str, context: str) -> Iterator[str]:
@@ -113,7 +172,7 @@ def _run_assistant_stream(user_message: str, context: str) -> Iterator[str]:
 
 def _append_exchange(history: list[dict[str, str]], user_message: str, assistant_message: str) -> None:
     history.append({"role": "user", "content": user_message})
-    history.append({"role": "assistant", "content": assistant_message})
+    history.append({"role": "assistant", "content": _clean_assistant_reply(assistant_message)})
     st.session_state[_history_key()] = history[-12:]
 
 
@@ -127,8 +186,13 @@ def _process_pending_prompt(history: list[dict[str, str]], context: str, ollama_
 
     with st.chat_message("assistant"):
         try:
-            streamed = st.write_stream(_run_assistant_stream(pending, context))
-            reply = streamed if isinstance(streamed, str) and streamed.strip() else "No response."
+            placeholder = st.empty()
+            raw_reply = ""
+            with st.spinner("Drafting"):
+                for piece in _run_assistant_stream(pending, context):
+                    raw_reply += piece
+            reply = _clean_assistant_reply(raw_reply) or "No usable response."
+            placeholder.write(reply)
         except Exception as exc:
             reply = f"Assistant error: {exc}"
             st.write(reply)
@@ -195,7 +259,10 @@ def _assistant_panel_body(
 
     for msg in history[-8:]:
         with st.chat_message(msg["role"]):
-            st.write(msg["content"])
+            if msg["role"] == "assistant":
+                st.write(_clean_assistant_reply(msg["content"]))
+            else:
+                st.write(msg["content"])
 
     quick_cols = st.columns(2)
     for idx, prompt in enumerate(QUICK_PROMPTS):

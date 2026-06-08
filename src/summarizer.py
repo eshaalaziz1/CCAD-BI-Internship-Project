@@ -49,6 +49,7 @@ __all__ = [
     "MODEL",
     "PROMPT_VERSION",
     "analyze_report",
+    "analyze_report_fast",
     "check_ollama_reachable",
     "heuristic_report_analysis",
     "repair_report_analysis",
@@ -1039,6 +1040,13 @@ def _analyze_report_pipeline(report_text: str, model: str = MODEL) -> tuple[dict
 def analyze_report_with_mode(report_text: str, model: str = MODEL) -> tuple[dict, str]:
     """Turn a clinical report into a briefing; returns (analysis, mode_label)."""
     return _analyze_report_pipeline(report_text, model)
+
+
+def analyze_report_fast(report_text: str, model: str = MODEL) -> tuple[dict, str]:
+    """Fast report briefing for local demos: deterministic extraction, no blocking LLM call."""
+    cleaned = _clean_report_noise(report_text)
+    base = _repair_report_analysis(_heuristic_report_analysis(cleaned), cleaned)
+    return base, "fast_heuristic"
 
 
 def analyze_report(report_text: str, model: str = MODEL) -> dict:

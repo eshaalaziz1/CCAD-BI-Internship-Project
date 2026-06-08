@@ -40,6 +40,7 @@ from src.patients import (
 )
 from src.summarizer import (
     analyze_report,
+    analyze_report_fast,
     analyze_report_with_mode,
     check_ollama_reachable,
     heuristic_report_analysis,
@@ -396,9 +397,16 @@ def analyze_report_with_loader(
     ]
 
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(analyze_report_with_mode, report_text)
+        future = executor.submit(analyze_report_fast, report_text)
         tick = 0
         while not future.done():
+            if tick > 420:
+                future.cancel()
+                loader.empty()
+                preview_slot.empty()
+                fallback = repair_report_analysis(heuristic_report_analysis(report_text), report_text)
+                _set_report_field(patient_id, "analysis_mode", "timeout_heuristic")
+                return fallback, False
             base_progress, stage = stages[min(tick // 4, len(stages) - 1)]
             with loader.container():
                 render_report_loader(base_progress + min(tick % 4, 3), stage)
@@ -1575,9 +1583,13 @@ def _legacy_report_analysis_with_loader(report_text: str) -> dict:
         (90, "Finalizing board view"),
     ]
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(analyze_report_with_mode, report_text)
+        future = executor.submit(analyze_report_fast, report_text)
         tick = 0
         while not future.done():
+            if tick > 300:
+                future.cancel()
+                loader.empty()
+                return repair_report_analysis(heuristic_report_analysis(report_text), report_text)
             base_progress, stage = stages[min(tick // 5, len(stages) - 1)]
             with loader.container():
                 render_report_loader(base_progress + min(tick % 5, 4), stage)
