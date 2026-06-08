@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Board queue</title>
+    <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: "Source Sans Pro", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #1f2a37;
+        background: transparent;
+      }
+      #list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+      }
+      .case-item {
+        border: 1px solid #d8e0ea;
+        border-radius: 8px;
+        padding: 0.55rem 0.65rem;
+        background: #fff;
+        cursor: grab;
+        user-select: none;
+        box-shadow: 0 1px 2px rgba(37, 94, 126, 0.06);
+      }
+      .case-item:hover {
+        border-color: #b8c7d6;
+      }
+      .case-item.active {
+        border-color: #255e7e;
+        background: #f7fbff;
+        box-shadow: 0 0 0 1px rgba(37, 94, 126, 0.18);
+      }
+      .case-item.sortable-chosen {
+        cursor: grabbing;
+      }
+      .case-item.sortable-ghost {
+        opacity: 0.45;
+      }
+      .case-title {
+        font-weight: 700;
+        color: #255e7e;
+        font-size: 0.9rem;
+        line-height: 1.25;
+      }
+      .case-meta {
+        margin-top: 0.2rem;
+      }
+      .status-pill {
+        display: inline-block;
+        padding: 0.12rem 0.5rem;
+        border-radius: 999px;
+        font-size: 0.72rem;
+        font-weight: 700;
+      }
+      .status-pill.readyforboard { background: #e8f1f8; color: #255e7e; }
+      .status-pill.missingimaging { background: #fff3cd; color: #8a6d1d; }
+      .status-pill.needspathology { background: #fde8e8; color: #9b3d3d; }
+      .status-pill.needsmolecularresults { background: #f3e8ff; color: #6b3fa0; }
+      .status-pill.urgent { background: #ffd6d6; color: #a11919; }
+      .status-pill.discussed { background: #d8f3dc; color: #1f6b42; }
+      .status-pill.decisionrecorded { background: #d4edda; color: #155724; }
+      .status-pill.queued { background: #e8f1f8; color: #255e7e; }
+      .status-pill.deferred { background: #fff3cd; color: #8a6d1d; }
+      .empty {
+        color: #65748b;
+        font-size: 0.86rem;
+        padding: 0.35rem 0.1rem;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="list"></div>
+    <script>
+      const Streamlit = (() => {
+        function send(type, data) {
+          window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type }, data), "*");
+        }
+        return {
+          setComponentReady() {
+            send("streamlit:componentReady", { apiVersion: 1 });
+          },
+          setFrameHeight(height) {
+            send("streamlit:setFrameHeight", { height });
+          },
+          setComponentValue(value) {
+            send("streamlit:setComponentValue", { value, dataType: "json" });
+          },
+          RENDER_EVENT: "streamlit:render",
+          events: {
+            addEventListener(type, handler) {
+              window.addEventListener("message", (event) => {
+                if (event.data.type === type) handler(event);
+              });
+            },
+          },
+        };
+      })();
+
+      let sortable = null;
+      let currentOrder = [];
+      let activeId = "";
+      let orderChanged = false;
+
+      function statusClass(raw) {
+        return String(raw || "readyforboard").toLowerCase().replace(/[^a-z0-9]/g, "");
+      }
+
+      function renderCases(cases, active) {
+        const list = document.getElementById("list");
+        list.innerHTML = "";
+        activeId = active || "";
+        currentOrder = cases.map((item) => item.id);
+
+        if (!cases.length) {
+          list.innerHTML = '<div class="empty">No cases on the board.</div>';
+          Streamlit.setFrameHeight(36);
+          return;
+        }
+
+        cases.forEach((item) => {
+          const row = document.createElement("div");
+          row.className = "case-item" + (item.id === activeId ? " active" : "");
+          row.dataset.caseId = item.id;
+          row.innerHTML =
+            '<div class="case-title">' + item.title + "</div>" +
+            '<div class="case-meta"><span class="status-pill ' + statusClass(item.status_class) + '">' +
+            item.status + "</span></div>";
+          row.addEventListener("click", () => {
+            if (orderChanged) {
+              orderChanged = false;
+              return;
+            }
+            if (item.id === activeId) return;
+            activeId = item.id;
+            renderCases(cases, activeId);
+            emit("select", activeId);
+          });
+          list.appendChild(row);
+        });
+
+        if (sortable) {
+          sortable.destroy();
+        }
+        sortable = Sortable.create(list, {
+          animation: 150,
+          draggable: ".case-item",
+          ghostClass: "sortable-ghost",
+          chosenClass: "sortable-chosen",
+          onEnd() {
+            const nextOrder = [...list.querySelectorAll(".case-item")].map((el) => el.dataset.caseId);
+            const changed = nextOrder.some((id, idx) => id !== currentOrder[idx]);
+            currentOrder = nextOrder;
+            if (changed) {
+              orderChanged = true;
+              emit("reorder", activeId);
+            }
+          },
+        });
+
+        Streamlit.setFrameHeight(Math.max(list.scrollHeight + 8, 48));
+      }
+
+      function emit(event, selectedId) {
+        Streamlit.setComponentValue({
+          order: currentOrder,
+          selected: selectedId || activeId,
+          event,
+        });
+      }
+
+      Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, (event) => {
+        const args = event.data.args || {};
+        const cases = args.cases || [];
+        renderCases(cases, args.activeId || "");
+      });
+
+      Streamlit.setComponentReady();
+    </script>
+  </body>
+</html>

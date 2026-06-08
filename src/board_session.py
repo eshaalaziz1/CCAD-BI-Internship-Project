@@ -225,11 +225,28 @@ def move_case(patient_id: str, direction: int) -> None:
     new_idx = idx + direction
     if 0 <= new_idx < len(queue):
         queue[idx], queue[new_idx] = queue[new_idx], queue[idx]
-        st.session_state["board_queue"] = queue
-        if st.session_state.get("board_active_idx") == idx:
-            st.session_state["board_active_idx"] = new_idx
-        elif st.session_state.get("board_active_idx") == new_idx:
-            st.session_state["board_active_idx"] = idx
+        reorder_board_queue(queue)
+
+
+def reorder_board_queue(new_queue: list[str]) -> None:
+    hydrate_meeting()
+    ensure_board_state()
+    valid = set(st.session_state["board_queue"])
+    queue = [patient_id for patient_id in new_queue if patient_id in valid]
+    for patient_id in st.session_state["board_queue"]:
+        if patient_id not in queue:
+            queue.append(patient_id)
+    active_pid = get_active_patient_id()
+    st.session_state["board_queue"] = queue
+    if active_pid and active_pid in queue:
+        st.session_state["board_active_idx"] = queue.index(active_pid)
+    elif queue:
+        st.session_state["board_active_idx"] = min(
+            st.session_state.get("board_active_idx", 0),
+            len(queue) - 1,
+        )
+    else:
+        st.session_state["board_active_idx"] = 0
     persist_meeting()
 
 

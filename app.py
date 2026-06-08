@@ -43,6 +43,7 @@ from src.summarizer import (
     repair_report_analysis,
     summarize_patient,
 )
+from src.board_queue_sorter import board_queue_sorter
 from src.board_session import (
     BOARD_STATUSES,
     add_patient_to_board,
@@ -53,11 +54,11 @@ from src.board_session import (
     get_meeting_date,
     get_meeting_state,
     hydrate_meeting,
-    move_case,
     normalize_board_status,
     persist_meeting,
     prune_board_queue,
     remove_from_board,
+    reorder_board_queue,
     row_for_patient_id,
     set_active_index,
     set_meeting_date,
@@ -634,36 +635,6 @@ def _profile_summary_for_patient(patient_id: str, row: pd.Series) -> str | None:
     return None
 
 
-def _go_to_patients_workspace(patient_id: str, df: pd.DataFrame) -> None:
-    row = row_for_patient_id(df, patient_id)
-    if row is not None:
-        st.session_state["selected_patient_id"] = patient_id
-        st.session_state["selected_patient_label"] = patient_profile_label(row)
-    st.session_state["workspace_nav"] = "Patients"
-
-
-def _go_to_todays_board(patient_id: str | None = None) -> None:
-    if patient_id:
-        add_patient_to_board(patient_id)
-        ensure_board_state()
-        queue = st.session_state.get("board_queue", [])
-        if patient_id in queue:
-            set_active_index(queue.index(patient_id))
-    st.session_state["workspace_nav"] = "Today's board"
-
-
-def _go_to_report_analysis(patient_id: str | None = None, df: pd.DataFrame | None = None) -> None:
-    if patient_id:
-        st.session_state["report_intake_patient_id"] = patient_id
-        st.session_state["report_link_patient_id"] = patient_id
-        if df is not None:
-            row = row_for_patient_id(df, patient_id)
-            if row is not None:
-                st.session_state["selected_patient_id"] = patient_id
-                st.session_state["selected_patient_label"] = patient_profile_label(row)
-    st.session_state["workspace_nav"] = "Report analysis"
-
-
 _REPORT_SESSION_FIELDS = (
     "pdf_bytes",
     "pdf_name",
@@ -956,39 +927,40 @@ def page_todays_board(df: pd.DataFrame, ollama_ok: bool) -> None:
     with queue_col:
         st.markdown('<div class="board-panel">', unsafe_allow_html=True)
         st.markdown("##### Case list")
-        for list_idx, pid in enumerate(queue):
+        board_cases = []
+        for pid in queue:
             case_row = row_for_patient_id(df, pid)
             if case_row is None:
                 continue
-            is_active = pid == patient_id
             status = normalize_board_status(
                 st.session_state["board_status"].get(pid, "Ready for board")
             )
-            label = f"{pid} · {case_row['diagnosis'][:28]}"
-            if st.button(
-                label,
-                key=f"board_pick_{pid}",
-                type="primary" if is_active else "secondary",
-                use_container_width=True,
-            ):
-                set_active_index(list_idx)
-                st.rerun()
-            st.markdown(
-                f'<div style="margin:-0.15rem 0 0.35rem 0.15rem;">{_board_status_html(status)}</div>',
-                unsafe_allow_html=True,
+            board_cases.append(
+                {
+                    "id": pid,
+                    "title": f"{pid} · {str(case_row['diagnosis'])[:28]}",
+                    "status": status,
+                    "status_class": re.sub(r"[^a-z0-9]", "", status.lower()),
+                }
             )
-        st.markdown("</div>", unsafe_allow_html=True)
 
-        if patient_id:
-            up_col, down_col = st.columns(2)
-            with up_col:
-                if st.button("Move up", disabled=idx <= 0, use_container_width=True):
-                    move_case(patient_id, -1)
+        queue_event = board_queue_sorter(
+            board_cases,
+            active_id=patient_id or "",
+            key="board_queue_sorter",
+        )
+        if queue_event and queue_event.get("event"):
+            if queue_event["event"] == "reorder":
+                new_order = [pid for pid in queue_event.get("order", []) if pid in queue]
+                if new_order and new_order != queue:
+                    reorder_board_queue(new_order)
                     st.rerun()
-            with down_col:
-                if st.button("Move down", disabled=idx >= len(queue) - 1, use_container_width=True):
-                    move_case(patient_id, 1)
+            elif queue_event["event"] == "select":
+                selected = str(queue_event.get("selected", ""))
+                if selected in queue and selected != patient_id:
+                    set_active_index(queue.index(selected))
                     st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
     with case_col:
         if row is None:
@@ -1083,25 +1055,13 @@ def page_todays_board(df: pd.DataFrame, ollama_ok: bool) -> None:
         if report_link:
             with st.expander(f"PDF briefing — {report_link.report_name}", expanded=False):
                 render_linked_report_summary(report_link, compact=True)
-                if st.button("Open full briefing", key=f"board_pdf_{patient_id}"):
-                    _go_to_report_analysis(patient_id, df)
-                    st.rerun()
 
         with st.expander("Chart details", expanded=False):
             render_patient_overview(row)
-            if st.button("Open patient record", key=f"board_chart_{patient_id}"):
-                _go_to_patients_workspace(patient_id, df)
-                st.rerun()
 
-        foot_a, foot_b = st.columns(2)
-        with foot_a:
-            if st.button("Open report analysis", use_container_width=True):
-                _go_to_report_analysis(patient_id, df)
-                st.rerun()
-        with foot_b:
-            if st.button("Remove from board", use_container_width=True):
-                remove_from_board(patient_id)
-                st.rerun()
+        if st.button("Remove from board", use_container_width=True):
+            remove_from_board(patient_id)
+            st.rerun()
 
         with st.expander("Full MDT brief (profile)", expanded=False):
             patient_data = format_patient_data(row)
@@ -1452,19 +1412,17 @@ def _record_from_report_snapshot(
     )
 
 
-def render_patient_report_status(patient_id: str, df: pd.DataFrame) -> None:
-    """Small link from the patient chart to the dedicated report analysis workspace."""
+def render_patient_report_status(patient_id: str) -> None:
+    """Show linked PDF briefing status on the patient chart."""
     link = load_patient_report_link(patient_id)
-    if link:
-        st.markdown(
-            f"<div class='info-card' style='margin:0.5rem 0 1rem; padding:0.75rem 1rem;'>"
-            f"<strong>PDF analyzed</strong> — {html.escape(link.report_name)}"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
-    if st.button("Open report analysis", type="primary", use_container_width=True, key=f"open_analysis_{patient_id}"):
-        _go_to_report_analysis(patient_id, df)
-        st.rerun()
+    if not link:
+        return
+    st.markdown(
+        f"<div class='info-card' style='margin:0.5rem 0 1rem; padding:0.75rem 1rem;'>"
+        f"<strong>PDF analyzed</strong> — {html.escape(link.report_name)}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def run_report_analysis_workbench(
@@ -1887,25 +1845,19 @@ def page_patient_chart(df: pd.DataFrame, ollama_ok: bool) -> None:
     )
 
     on_board = patient_id in st.session_state.get("board_queue", [])
-    action_a, action_b = st.columns(2)
-    with action_a:
-        if st.button(
-            "On today's board" if on_board else "Add to today's board",
-            disabled=on_board,
-            use_container_width=True,
-            key=f"patient_add_board_{patient_id}",
-        ):
-            add_patient_to_board(patient_id)
-            st.rerun()
-    with action_b:
-        if on_board and st.button("Go to board case", use_container_width=True, key=f"patient_board_{patient_id}"):
-            _go_to_todays_board(patient_id)
-            st.rerun()
+    if st.button(
+        "On today's board" if on_board else "Add to today's board",
+        disabled=on_board,
+        use_container_width=True,
+        key=f"patient_add_board_{patient_id}",
+    ):
+        add_patient_to_board(patient_id)
+        st.rerun()
 
     left, right = st.columns([0.52, 0.48])
 
     with left:
-        render_patient_report_status(patient_id, df)
+        render_patient_report_status(patient_id)
         tab_overview, tab_profile = st.tabs(["Overview", "Full profile"])
         with tab_overview:
             render_patient_overview(row)
