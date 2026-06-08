@@ -106,5 +106,41 @@
     "notes": "Patient presents with symptoms of fatigue and weight loss. Further evaluation required.",
     "intake_text": "New patient presenting with metastatic breast cancer. Initial workup confirms stage IV disease. Discussed treatment options including chemotherapy and targeted therapy. Patient declined initial chemotherapy recommendation.",
     "source": "synthetic"
+  },
+  {
+    "patient_id": "P017",
+    "age": 35,
+    "sex": "M",
+    "diagnosis": "Acute Myeloid Leukemia (AML)",
+    "stage": "R2",
+    "ecog": 1,
+    "biomarkers": "FLT3-ITD, NPM1",
+    "imaging": "Chest X-ray: Clear. CT Abdomen/Pelvis: No lymphadenopathy.",
+    "pathology": "Bone marrow biopsy: Hypercellular marrow with >20% blasts, consistent with AML. Cytogenetics: Trisomy 8, del(15q).",
+    "comorbidities": "Hypertension",
+    "medications": "Ibuprofen 600mg TID",
+    "pending_tests": "Flow cytometry for CD33, CD123; FISH for RUNX1T1, CEBPA",
+    "prior_treatment": "None",
+    "notes": "Patient presents with fatigue and fever. Initial CBC shows pancytopenia. Peripheral smear shows blasts.",
+    "intake_text": "New onset AML requiring initiation of chemotherapy. Patient is hemodynamically stable. Discussed treatment options including 7+3 regimen.",
+    "source": "synthetic"
+  },
+  {
+    "patient_id": "P018",
+    "age": 35,
+    "sex": "F",
+    "diagnosis": "Diffuse Large B-cell Lymphoma (DLBCL)",
+    "stage": "III",
+    "ecog": 1,
+    "biomarkers": "CD30+, BCL6+, CD15-, CD20+, MUM1-",
+    "imaging": "PET/CT shows extensive nodal involvement with minimal extranodal disease.",
+    "pathology": "Core biopsy confirms DLBCL, GCB subtype.",
+    "comorbidities": "Hypertension, Type 2 Diabetes Mellitus.",
+    "medications": "Rituximab, Cyclophosphamide, Dexamethasone.",
+    "pending_tests": "Bone marrow biopsy; CT scan of chest",
+    "prior_treatment": "None.",
+    "notes": "Patient presents with rapidly enlarging left axillary mass. Initial biopsy confirms DLBCL. Pending further workup.",
+    "intake_text": "35-year-old female with newly diagnosed Diffuse Large B-cell Lymphoma. Presents with rapidly enlarging left axillary mass. Initial biopsy confirms DLBCL, GCB subtype. Pending further workup.",
+    "source": "synthetic"
   }
 ]

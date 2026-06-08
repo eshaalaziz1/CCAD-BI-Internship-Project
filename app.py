@@ -2307,6 +2307,8 @@ def render_patient_overview(row: pd.Series) -> None:
 def page_patient_chart(df: pd.DataFrame, ollama_ok: bool) -> None:
     hydrate_meeting()
     ensure_board_state()
+    if flash := st.session_state.pop("patient_save_flash", None):
+        st.success(flash)
     row = get_selected_row(df)
     patient_id = str(row["patient_id"])
     patient_data = format_patient_data(row)
@@ -2504,10 +2506,12 @@ def page_add_patient(df: pd.DataFrame) -> None:
         try:
             add_custom_patient(record)
             bump_patient_data_version()
-            st.session_state.selected_patient_label = patient_profile_label(
-                pd.Series(record)
-            )
-            st.success(f"Patient {record['patient_id']} saved.")
+            get_patients_df.clear()
+            pid = str(record["patient_id"])
+            st.session_state["selected_patient_id"] = pid
+            st.session_state["selected_patient_label"] = patient_profile_label(pd.Series(record))
+            st.session_state["workspace_nav"] = "Patients"
+            st.session_state["patient_save_flash"] = f"Patient {pid} saved."
             st.rerun()
         except ValueError as exc:
             st.error(str(exc))
@@ -2541,7 +2545,7 @@ def page_synthetic_intake(df: pd.DataFrame, ollama_ok: bool) -> None:
         return
 
     st.markdown("##### Review draft")
-    draft["patient_id"] = next_patient_id(df)
+    suggested_id = next_patient_id(df)
 
     long_fields = {
         "biomarkers",
@@ -2552,36 +2556,56 @@ def page_synthetic_intake(df: pd.DataFrame, ollama_ok: bool) -> None:
         "intake_text",
     }
 
-    with st.form("save_synthetic_form"):
+    with st.form("save_synthetic_form", clear_on_submit=False):
         edited: dict = {}
+        edited["patient_id"] = st.text_input("Patient ID", value=suggested_id)
         for col in PATIENT_COLUMNS:
-            if col == "source":
+            if col in ("source", "patient_id"):
                 continue
             label = col.replace("_", " ").title()
             raw = draft.get(col, "")
             if col == "age":
-                edited[col] = st.number_input(label, min_value=0, max_value=120, value=int(raw or 60))
+                edited[col] = st.number_input(
+                    label, min_value=0, max_value=120, value=coerce_int(raw, 60)
+                )
             elif col == "ecog":
-                edited[col] = st.selectbox(label, [0, 1, 2, 3, 4], index=int(raw or 0))
+                edited[col] = st.selectbox(
+                    label,
+                    [0, 1, 2, 3, 4],
+                    index=min(4, max(0, coerce_int(raw, 1))),
+                )
             elif col == "sex":
                 s = str(raw or "F")[:1].upper()
-                edited[col] = st.selectbox(label, ["F", "M", "U"], index=["F", "M", "U"].index(s) if s in "FMU" else 0)
+                edited[col] = st.selectbox(
+                    label,
+                    ["F", "M", "U"],
+                    index=["F", "M", "U"].index(s) if s in "FMU" else 0,
+                )
             elif col in long_fields:
                 edited[col] = st.text_area(label, value=str(raw), height=80)
             else:
                 edited[col] = st.text_input(label, value=str(raw))
 
-        if st.form_submit_button("Save to patient panel", type="primary"):
-            record = normalize_record({**draft, **edited, "source": "synthetic"}, source="synthetic")
-            try:
-                add_custom_patient(record)
-                bump_patient_data_version()
-                st.session_state.pop("synthetic_draft", None)
-                st.session_state.selected_patient_label = patient_profile_label(pd.Series(record))
-                st.success(f"Saved synthetic patient {record['patient_id']}.")
-                st.rerun()
-            except ValueError as exc:
-                st.error(str(exc))
+        submitted = st.form_submit_button("Save to patient panel", type="primary")
+
+    if submitted:
+        if not str(edited.get("diagnosis", "")).strip() or not str(edited.get("stage", "")).strip():
+            st.error("Diagnosis and stage are required.")
+            return
+        record = normalize_record({**draft, **edited, "source": "synthetic"}, source="synthetic")
+        try:
+            add_custom_patient(record)
+            bump_patient_data_version()
+            get_patients_df.clear()
+            pid = str(record["patient_id"])
+            st.session_state.pop("synthetic_draft", None)
+            st.session_state["selected_patient_id"] = pid
+            st.session_state["selected_patient_label"] = patient_profile_label(pd.Series(record))
+            st.session_state["workspace_nav"] = "Patients"
+            st.session_state["patient_save_flash"] = f"Saved synthetic patient {pid}."
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
 
 
 def main() -> None:
