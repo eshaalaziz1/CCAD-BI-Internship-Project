@@ -39,6 +39,7 @@ from src.patients import (
     update_custom_patient,
 )
 from src.summarizer import (
+    analyze_report,
     analyze_report_with_mode,
     check_ollama_reachable,
     heuristic_report_analysis,
@@ -51,12 +52,16 @@ from src.board_session import (
     add_patient_to_board,
     add_patients_to_board,
     board_progress,
+    create_new_board,
+    display_meeting_date,
     ensure_board_state,
     get_active_patient_id,
     get_meeting_date,
     get_meeting_state,
     hydrate_meeting,
+    init_board_session,
     normalize_board_status,
+    open_meeting,
     persist_meeting,
     prune_board_queue,
     remove_from_board,
@@ -67,6 +72,7 @@ from src.board_session import (
     set_status,
     update_case_notes,
 )
+from src.board_store import list_meeting_summaries
 from src.patient_reports import (
     delete_patient_report_link,
     load_patient_report_link,
@@ -845,22 +851,57 @@ def _render_action_items_editor(patient_id: str) -> list[dict]:
     return updated
 
 
+def _format_saved_board_label(summary: dict[str, str | int]) -> str:
+    board_key = str(summary["meeting_date"])
+    title = str(summary["board_title"]).strip()
+    case_count = int(summary["case_count"])
+    label = date.fromisoformat(display_meeting_date(board_key)).strftime("%b %d, %Y")
+    if title:
+        label = f"{title} — {label}"
+    elif "#" in board_key:
+        label += f" · board {board_key.split('#', 1)[1][:4]}"
+    noun = "case" if case_count == 1 else "cases"
+    return f"{label} ({case_count} {noun})"
+
+
+def render_saved_board_sessions() -> None:
+    summaries = list_meeting_summaries()
+    if not summaries:
+        return
+
+    current = get_meeting_date()
+    with st.expander("Saved boards", expanded=False):
+        for summary in summaries:
+            board_key = str(summary["meeting_date"])
+            label = _format_saved_board_label(summary)
+            is_current = board_key == current
+            label_col, action_col = st.columns([4, 1])
+            with label_col:
+                suffix = " · open now" if is_current else ""
+                st.markdown(f"**{label}**{suffix}")
+            with action_col:
+                if not is_current and st.button(
+                    "Open",
+                    key=f"open_board_{board_key.replace('#', '_')}",
+                    use_container_width=True,
+                ):
+                    open_meeting(board_key)
+                    st.rerun()
+
+
 def page_todays_board(df: pd.DataFrame, ollama_ok: bool) -> None:
     prune_board_queue(df)
     ensure_board_state()
+    render_saved_board_sessions()
 
-    meta1, meta2, meta3 = st.columns([1, 1.2, 1])
+    meta1, meta2, meta3, meta4 = st.columns([1.1, 1.35, 0.55, 0.4])
     with meta1:
-        picked = st.date_input(
-            "Meeting date",
-            value=date.fromisoformat(get_meeting_date()),
-            key="board_meeting_date_picker",
+        st.text_input(
+            "Board date",
+            value=date.fromisoformat(display_meeting_date(get_meeting_date())).strftime("%b %d, %Y"),
+            disabled=True,
+            key="board_display_date",
         )
-        picked_iso = picked.isoformat()
-        if picked_iso != get_meeting_date():
-            set_meeting_date(picked_iso)
-            hydrate_meeting(picked_iso)
-            st.rerun()
     with meta2:
         board_title = st.text_input(
             "Board title",
@@ -882,29 +923,46 @@ def page_todays_board(df: pd.DataFrame, ollama_ok: bool) -> None:
         dl_pdf, dl_md = st.columns(2)
         with dl_pdf:
             st.download_button(
-                "Export minutes (PDF)",
+                "📄",
                 data=minutes_pdf,
-                file_name=f"board_minutes_{get_meeting_date()}.pdf",
+                file_name=f"board_minutes_{display_meeting_date(get_meeting_date())}.pdf",
                 mime="application/pdf",
                 disabled=not state.cases,
                 use_container_width=True,
+                help="Export minutes (PDF)",
             )
         with dl_md:
             st.download_button(
-                "Export minutes (Markdown)",
+                "📝",
                 data=minutes_md,
-                file_name=f"board_minutes_{get_meeting_date()}.md",
+                file_name=f"board_minutes_{display_meeting_date(get_meeting_date())}.md",
                 mime="text/markdown",
                 disabled=not state.cases,
                 use_container_width=True,
+                help="Export minutes (Markdown)",
             )
+    with meta4:
+        with st.popover("+", use_container_width=True, help="New board"):
+            new_date = st.date_input(
+                "Meeting date",
+                value=date.today(),
+                key="board_new_date_picker",
+            )
+            new_title = st.text_input(
+                "Board title",
+                placeholder="Optional",
+                key="board_new_title_input",
+            )
+            if st.button("Create board", type="primary", use_container_width=True):
+                create_new_board(new_date.isoformat(), new_title.strip())
+                st.rerun()
 
     total, discussed, remaining = board_progress()
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("On board", total)
     m2.metric("Discussed", discussed)
     m3.metric("Remaining", remaining)
-    m4.metric("Meeting", get_meeting_date())
+    m4.metric("Meeting", display_meeting_date(get_meeting_date()))
 
     with st.expander("Add cases", expanded=not st.session_state["board_queue"]):
         label_to_id = {
@@ -916,11 +974,13 @@ def page_todays_board(df: pd.DataFrame, ollama_ok: bool) -> None:
         picked = st.multiselect(
             "Select patients",
             available,
-            placeholder="Choose cases for today's meeting…",
+            placeholder="Choose cases for this board…",
             key="board_add_multiselect",
         )
         if st.button("Add to board", type="primary", disabled=not picked, use_container_width=True):
-            add_patients_to_board([label_to_id[label] for label in picked])
+            added = add_patients_to_board([label_to_id[label] for label in picked])
+            if added:
+                st.session_state.pop("board_add_multiselect", None)
             st.rerun()
 
     if not st.session_state["board_queue"]:
@@ -956,7 +1016,7 @@ def page_todays_board(df: pd.DataFrame, ollama_ok: bool) -> None:
         queue_event = board_queue_sorter(
             board_cases,
             active_id=patient_id or "",
-            key="board_queue_sorter",
+            key=f"board_queue_sorter_{get_meeting_date()}",
         )
         if queue_event and queue_event.get("event"):
             if queue_event["event"] == "reorder":
@@ -976,9 +1036,14 @@ def page_todays_board(df: pd.DataFrame, ollama_ok: bool) -> None:
             st.warning("Selected case is no longer available.")
             return
 
-        prev_col, count_col, next_col = st.columns([1, 1.2, 1])
+        prev_col, count_col, next_col = st.columns([0.45, 1.1, 0.45])
         with prev_col:
-            if st.button("← Previous", disabled=idx <= 0, use_container_width=True):
+            if st.button(
+                "←",
+                disabled=idx <= 0,
+                use_container_width=True,
+                help="Previous case",
+            ):
                 set_active_index(idx - 1)
                 st.rerun()
         with count_col:
@@ -988,7 +1053,12 @@ def page_todays_board(df: pd.DataFrame, ollama_ok: bool) -> None:
                 unsafe_allow_html=True,
             )
         with next_col:
-            if st.button("Next →", disabled=idx >= len(queue) - 1, use_container_width=True):
+            if st.button(
+                "→",
+                disabled=idx >= len(queue) - 1,
+                use_container_width=True,
+                help="Next case",
+            ):
                 set_active_index(idx + 1)
                 st.rerun()
 
@@ -1611,7 +1681,13 @@ def render_legacy_report_analysis(analysis: dict, report_text: str) -> None:
             _legacy_list(problems, "No priority problems were extracted.")
 
     with tab_charts:
-        render_report_charts(analysis, report_text, section_label=None)
+        chart_key = hashlib.sha256(report_text[:4000].encode("utf-8")).hexdigest()[:12]
+        render_report_charts(
+            analysis,
+            report_text,
+            section_label=None,
+            chart_key_prefix=f"legacy_{chart_key}",
+        )
 
     with tab_team:
         _legacy_specialist_cards(analysis.get("specialist_focus"))
@@ -1703,14 +1779,16 @@ def render_layered_analysis(
     has_report = bool(analysis and report_text)
     tab_visual, tab_clinical = st.tabs(["Visual insights", "Clinical briefing"])
 
+    patient_id = str(row.get("patient_id", "patient"))
     with tab_visual:
-        render_profile_visual_insights(row)
+        render_profile_visual_insights(row, chart_key_prefix=f"layered_profile_{patient_id}")
         if has_report:
             st.divider()
             render_report_charts(
                 analysis,
                 report_text,
                 section_label="Added from uploaded report",
+                chart_key_prefix=f"layered_report_{patient_id}",
             )
     with tab_clinical:
         st.markdown("#### Chart record")
@@ -1828,7 +1906,7 @@ def run_report_analysis_workbench(
             _set_report_field(patient_id, "analysis", saved_link.analysis)
             _set_report_field(patient_id, "fingerprint", saved_link.report_fingerprint)
             _set_report_field(patient_id, "name", saved_link.report_name)
-        else:
+        elif not _get_report_field(patient_id, "text"):
             return None, None
     else:
         report_name = _get_report_field(patient_id, "pdf_name", "uploaded_report.pdf")
@@ -1919,14 +1997,18 @@ def render_report_chart_review(
         snapshot = {}
     draft = _record_from_report_snapshot(snapshot, analysis, report_text, df, patient_id=patient_id)
 
-    st.markdown("#### Review extracted data")
-    merge_chart = st.checkbox(
-        "Merge extracted fields into patient chart",
-        value=str(row.get("source", "")) in ("custom", "synthetic"),
-        disabled=str(row.get("source", "")) not in ("custom", "synthetic"),
-        help="Reference patients keep chart read-only; briefing still saves.",
+    st.markdown("#### Save briefing to patient")
+    st.caption(
+        "Stores the board briefing unchanged. Optionally merge suggested chart fields below."
     )
-    with st.form(f"report_review_{patient_id}"):
+    chart_editable = str(row.get("source", "")) in ("custom", "synthetic")
+    with st.form(f"report_review_{patient_id}", clear_on_submit=False):
+        merge_chart = st.checkbox(
+            "Merge suggested fields into patient chart",
+            value=chart_editable,
+            disabled=not chart_editable,
+            help="Reference patients keep chart read-only; briefing still saves.",
+        )
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             diag = st.text_input("Diagnosis", value=str(draft.get("diagnosis", row.get("diagnosis", ""))))
@@ -1967,46 +2049,42 @@ def render_report_chart_review(
             "MDT question for today",
             value=str(analysis.get("meeting_objective", ""))[:240],
         )
-        save = st.form_submit_button("Save briefing to patient", type="primary")
-
-    if not save:
-        return
-
-    report_name = _get_report_field(patient_id, "name", "uploaded_report.pdf")
-    report_fingerprint = _get_report_field(patient_id, "fingerprint", "")
-    _save_report_to_patient(
-        patient_id,
-        report_name=report_name,
-        report_fingerprint=report_fingerprint,
-        analysis=analysis,
-        report_text=report_text,
-    )
-    if merge_chart:
-        record = {col: row.get(col, "") for col in PATIENT_COLUMNS}
-        record.update(
-            {
-                "patient_id": patient_id,
-                "diagnosis": diag,
-                "stage": stage,
-                "ecog": ecog,
-                "biomarkers": biomarkers,
-                "imaging": imaging,
-                "pathology": pathology,
-                "pending_tests": pending,
-                "prior_treatment": prior,
-                "notes": mdt_question or str(record.get("notes", "")),
-            }
-        )
-        try:
-            update_custom_patient(record)
-            bump_patient_data_version()
-            log_audit_event("chart_merged_from_report", patient_id=patient_id)
-        except ValueError as exc:
-            st.warning(str(exc))
-    st.session_state.pop(f"report_pending_review_{patient_id}", None)
-    log_audit_event("report_briefing_saved", patient_id=patient_id)
-    st.success("PDF briefing saved.")
-    st.rerun()
+        if st.form_submit_button("Save briefing to patient", type="primary"):
+            report_name = _get_report_field(patient_id, "name", "uploaded_report.pdf")
+            report_fingerprint = _get_report_field(patient_id, "fingerprint", "")
+            _save_report_to_patient(
+                patient_id,
+                report_name=report_name,
+                report_fingerprint=report_fingerprint,
+                analysis=analysis,
+                report_text=report_text,
+            )
+            if merge_chart:
+                record = {col: row.get(col, "") for col in PATIENT_COLUMNS}
+                record.update(
+                    {
+                        "patient_id": patient_id,
+                        "diagnosis": diag,
+                        "stage": stage,
+                        "ecog": ecog,
+                        "biomarkers": biomarkers,
+                        "imaging": imaging,
+                        "pathology": pathology,
+                        "pending_tests": pending,
+                        "prior_treatment": prior,
+                        "notes": mdt_question or str(record.get("notes", "")),
+                    }
+                )
+                try:
+                    update_custom_patient(record)
+                    bump_patient_data_version()
+                    log_audit_event("chart_merged_from_report", patient_id=patient_id)
+                except ValueError as exc:
+                    st.warning(str(exc))
+            st.session_state.pop(f"report_pending_review_{patient_id}", None)
+            log_audit_event("report_briefing_saved", patient_id=patient_id)
+            st.success("PDF briefing saved.")
+            st.rerun()
 
 
 def render_new_patient_from_report(df: pd.DataFrame, ollama_ok: bool) -> None:
@@ -2017,6 +2095,13 @@ def render_new_patient_from_report(df: pd.DataFrame, ollama_ok: bool) -> None:
         ollama_ok,
         persist_link=False,
     )
+    if analysis and report_text:
+        st.session_state["new_report_draft_analysis"] = analysis
+        st.session_state["new_report_draft_text"] = report_text
+    else:
+        analysis = st.session_state.get("new_report_draft_analysis")
+        report_text = st.session_state.get("new_report_draft_text")
+
     if not analysis or not report_text:
         return
 
@@ -2025,14 +2110,13 @@ def render_new_patient_from_report(df: pd.DataFrame, ollama_ok: bool) -> None:
     if not isinstance(snapshot, dict):
         snapshot = {}
     draft_record = _record_from_report_snapshot(snapshot, analysis, report_text, df)
-    draft_row = pd.Series(draft_record)
 
     st.divider()
-    render_layered_analysis(draft_row, analysis, report_text)
+    render_legacy_report_analysis(analysis, report_text)
 
     st.divider()
     st.markdown("#### Add to patient registry")
-    with st.form("create_patient_from_report"):
+    with st.form("create_patient_from_report", clear_on_submit=False):
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             new_id = st.text_input("Patient ID", value=draft_record["patient_id"])
@@ -2048,67 +2132,82 @@ def render_new_patient_from_report(df: pd.DataFrame, ollama_ok: bool) -> None:
         new_diagnosis = st.text_input("Diagnosis", value=str(draft_record["diagnosis"]))
         new_stage = st.text_input("Stage", value=str(draft_record["stage"]))
         new_intake = st.text_area("Clinical narrative", value=str(draft_record["intake_text"]), height=160)
-        save = st.form_submit_button("Create patient & save report", type="primary")
-
-    if save:
-        if not new_diagnosis.strip() or not new_stage.strip():
-            st.error("Diagnosis and stage are required.")
-            return
-        record = normalize_record(
-            {
-                "patient_id": new_id,
-                "age": new_age,
-                "sex": new_sex,
-                "diagnosis": new_diagnosis,
-                "stage": new_stage,
-                "ecog": new_ecog,
-                "biomarkers": draft_record.get("biomarkers", ""),
-                "imaging": draft_record.get("imaging", ""),
-                "pathology": draft_record.get("pathology", ""),
-                "comorbidities": draft_record.get("comorbidities", ""),
-                "medications": draft_record.get("medications", ""),
-                "pending_tests": draft_record.get("pending_tests", ""),
-                "prior_treatment": draft_record.get("prior_treatment", ""),
-                "notes": draft_record.get("notes", ""),
-                "intake_text": new_intake,
-                "source": "custom",
-            },
-            source="custom",
-        )
-        try:
-            add_custom_patient(record)
-            bump_patient_data_version()
-            pid = str(record["patient_id"])
-            report_name = _get_report_field(NEW_REPORT_PATIENT_ID, "name", "uploaded_report.pdf")
-            report_fingerprint = _get_report_field(NEW_REPORT_PATIENT_ID, "fingerprint", "")
-            _save_report_to_patient(
-                pid,
-                report_name=report_name,
-                report_fingerprint=report_fingerprint,
-                analysis=analysis,
-                report_text=report_text,
-            )
-            _clear_report_workbench(NEW_REPORT_PATIENT_ID)
-            st.session_state["report_analysis_mode"] = "Patient on file"
-            st.session_state["selected_patient_id"] = pid
-            st.session_state["selected_patient_label"] = patient_profile_label(pd.Series(record))
-            st.session_state["report_intake_patient_id"] = pid
-            st.success(f"Created **{pid}** and linked the PDF briefing.")
-            st.rerun()
-        except ValueError as exc:
-            st.error(str(exc))
+        if st.form_submit_button("Create patient & save report", type="primary"):
+            if not new_diagnosis.strip() or not new_stage.strip():
+                st.error("Diagnosis and stage are required.")
+            else:
+                record = normalize_record(
+                    {
+                        "patient_id": new_id,
+                        "age": new_age,
+                        "sex": new_sex,
+                        "diagnosis": new_diagnosis,
+                        "stage": new_stage,
+                        "ecog": new_ecog,
+                        "biomarkers": draft_record.get("biomarkers", ""),
+                        "imaging": draft_record.get("imaging", ""),
+                        "pathology": draft_record.get("pathology", ""),
+                        "comorbidities": draft_record.get("comorbidities", ""),
+                        "medications": draft_record.get("medications", ""),
+                        "pending_tests": draft_record.get("pending_tests", ""),
+                        "prior_treatment": draft_record.get("prior_treatment", ""),
+                        "notes": draft_record.get("notes", ""),
+                        "intake_text": new_intake,
+                        "source": "custom",
+                    },
+                    source="custom",
+                )
+                try:
+                    add_custom_patient(record)
+                    bump_patient_data_version()
+                    pid = str(record["patient_id"])
+                    report_name = _get_report_field(NEW_REPORT_PATIENT_ID, "name", "uploaded_report.pdf")
+                    report_fingerprint = _get_report_field(NEW_REPORT_PATIENT_ID, "fingerprint", "")
+                    _save_report_to_patient(
+                        pid,
+                        report_name=report_name,
+                        report_fingerprint=report_fingerprint,
+                        analysis=analysis,
+                        report_text=report_text,
+                    )
+                    _clear_report_workbench(NEW_REPORT_PATIENT_ID)
+                    st.session_state.pop("new_report_draft_analysis", None)
+                    st.session_state.pop("new_report_draft_text", None)
+                    st.session_state["report_analysis_mode"] = "Existing patient"
+                    st.session_state["selected_patient_id"] = pid
+                    st.session_state["selected_patient_label"] = patient_profile_label(pd.Series(record))
+                    st.session_state["report_intake_patient_id"] = pid
+                    st.success(f"Created **{pid}** and linked the PDF briefing.")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
 
 
 def page_report_analysis(df: pd.DataFrame, ollama_ok: bool) -> None:
+    st.subheader("Report analysis")
+    st.caption("Upload a clinical PDF for a meeting-ready board briefing.")
+
+    if not ollama_ok:
+        st.warning("Start Ollama locally to enable report analysis.")
+
+    _mode_options = ("Existing patient", "New patient")
+    _legacy_mode = st.session_state.get("report_analysis_mode")
+    if _legacy_mode == "Patient on file":
+        st.session_state["report_analysis_mode"] = "Existing patient"
+    elif _legacy_mode == "New patient from report":
+        st.session_state["report_analysis_mode"] = "New patient"
+    elif _legacy_mode not in _mode_options:
+        st.session_state["report_analysis_mode"] = "Existing patient"
+
     mode = st.radio(
-        "Mode",
-        ["Patient on file", "New patient from report"],
+        "Save to",
+        list(_mode_options),
         horizontal=True,
         key="report_analysis_mode",
         label_visibility="collapsed",
     )
 
-    if mode == "New patient from report":
+    if mode == "New patient":
         render_new_patient_from_report(df, ollama_ok)
         return
 
@@ -2117,9 +2216,15 @@ def page_report_analysis(df: pd.DataFrame, ollama_ok: bool) -> None:
     render_patient_context_strip(row)
 
     analysis, report_text = run_report_analysis_workbench(patient_id, ollama_ok)
-    if analysis and report_text and st.session_state.get(f"report_pending_review_{patient_id}"):
-        render_report_chart_review(patient_id, row, analysis, report_text, df)
-    render_layered_analysis(row, analysis, report_text)
+    if not analysis or not report_text:
+        return
+
+    repaired = repair_report_analysis(analysis, report_text)
+    render_legacy_report_analysis(repaired, report_text)
+
+    if st.session_state.get(f"report_pending_review_{patient_id}"):
+        st.divider()
+        render_report_chart_review(patient_id, row, repaired, report_text, df)
 
 
 def _header_title(nav: str) -> str:
@@ -2476,6 +2581,8 @@ def main() -> None:
     )
     inject_styles()
 
+    init_board_session()
+
     version = st.session_state.get("patients_version", 0)
     df = get_patients_df(version)
     ollama_ok = check_ollama_reachable()
@@ -2508,7 +2615,7 @@ def main() -> None:
     elif nav == "Patients":
         page_patient_chart(df, ollama_ok)
     elif nav == "Report analysis":
-        page_legacy_report_intake(ollama_ok)
+        page_report_analysis(df, ollama_ok)
     elif nav == "Add patient":
         page_add_patient(df)
     else:

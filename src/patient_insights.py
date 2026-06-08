@@ -24,32 +24,40 @@ def patient_chart_text(row: pd.Series) -> str:
     return "\n\n".join(parts)
 
 
-def render_profile_visual_insights(row: pd.Series, *, label: str = "Patient chart (on file)") -> bool:
+def render_profile_visual_insights(
+    row: pd.Series,
+    *,
+    label: str = "Patient chart (on file)",
+    chart_key_prefix: str | None = None,
+) -> bool:
     """Charts and measurement cards from structured profile + narrative."""
     st.markdown(f"#### {label}")
     text = patient_chart_text(row)
+    patient_id = str(row.get("patient_id", "patient"))
+    prefix = chart_key_prefix or f"profile_{patient_id}"
     numeric_df = _numeric_measurements(text)
     if numeric_df.empty:
         timeline = chart_timeline(text)
         history = chart_history_durations(text)
         if timeline is not None:
-            st.plotly_chart(timeline, use_container_width=True)
+            st.plotly_chart(timeline, use_container_width=True, key=f"{prefix}_timeline")
             return True
         if history is not None:
-            st.plotly_chart(history, use_container_width=True)
+            st.plotly_chart(history, use_container_width=True, key=f"{prefix}_history")
             return True
+        st.caption("No chartable vitals, labs, or timelines in the patient record yet.")
         return False
 
     vitals_chart = chart_vitals_and_labs(text)
     if vitals_chart is not None:
         render_measurement_cards(numeric_df)
-        st.plotly_chart(vitals_chart, use_container_width=True)
+        st.plotly_chart(vitals_chart, use_container_width=True, key=f"{prefix}_vitals")
     timeline = chart_timeline(text)
     if timeline is not None:
-        st.plotly_chart(timeline, use_container_width=True)
+        st.plotly_chart(timeline, use_container_width=True, key=f"{prefix}_timeline")
     history = chart_history_durations(text)
     if history is not None:
-        st.plotly_chart(history, use_container_width=True)
+        st.plotly_chart(history, use_container_width=True, key=f"{prefix}_history")
     return True
 
 

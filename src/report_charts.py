@@ -436,6 +436,7 @@ def render_report_charts(
     report_text: str,
     *,
     section_label: str | None = "Uploaded report",
+    chart_key_prefix: str = "report",
 ) -> None:
     if section_label:
         st.markdown(f"#### {section_label}")
@@ -456,18 +457,42 @@ def render_report_charts(
     history_chart = chart_history_durations(report_text)
 
     if vitals_chart is None and timeline_chart is None and history_chart is None:
+        st.caption("No numeric values or timelines were found in this report.")
         return
 
     if vitals_chart is not None:
         render_measurement_cards(numeric_df)
-        st.plotly_chart(vitals_chart, use_container_width=True)
+        st.plotly_chart(
+            vitals_chart,
+            use_container_width=True,
+            key=f"{chart_key_prefix}_vitals",
+        )
         with st.expander("Measurement details"):
             st.dataframe(numeric_df, use_container_width=True, hide_index=True)
 
-    left, right = st.columns(2)
-    with left:
-        if timeline_chart is not None:
-            st.plotly_chart(timeline_chart, use_container_width=True)
-    with right:
-        if history_chart is not None:
-            st.plotly_chart(history_chart, use_container_width=True)
+    if timeline_chart is not None and history_chart is not None:
+        left, right = st.columns(2)
+        with left:
+            st.plotly_chart(
+                timeline_chart,
+                use_container_width=True,
+                key=f"{chart_key_prefix}_timeline",
+            )
+        with right:
+            st.plotly_chart(
+                history_chart,
+                use_container_width=True,
+                key=f"{chart_key_prefix}_history",
+            )
+    elif timeline_chart is not None:
+        st.plotly_chart(
+            timeline_chart,
+            use_container_width=True,
+            key=f"{chart_key_prefix}_timeline",
+        )
+    elif history_chart is not None:
+        st.plotly_chart(
+            history_chart,
+            use_container_width=True,
+            key=f"{chart_key_prefix}_history",
+        )

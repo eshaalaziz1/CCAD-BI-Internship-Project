@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import secrets
 from datetime import date
 
 import streamlit as st
 
 from src.board_store import (
+    LAST_BOARD_MEETING_KEY,
     ActionItem,
     MeetingCase,
     MeetingState,
     default_meeting_date,
+    get_app_setting,
     load_meeting,
     save_meeting,
+    set_app_setting,
 )
 
 BOARD_STATUSES = (
@@ -38,8 +42,21 @@ def normalize_board_status(status: str) -> str:
     return _LEGACY_STATUS_MAP.get(cleaned, "Ready for board")
 
 
+def display_meeting_date(board_key: str) -> str:
+    """Calendar date portion of a board key (legacy keys are date-only)."""
+    return board_key.split("#", 1)[0]
+
+
+def new_board_key(display_date: str) -> str:
+    clean = display_meeting_date(display_date.strip())
+    return f"{clean}#{secrets.token_hex(4)}"
+
+
 def get_meeting_date() -> str:
-    return st.session_state.setdefault("board_meeting_date", default_meeting_date())
+    if "board_meeting_date" not in st.session_state:
+        stored = get_app_setting(LAST_BOARD_MEETING_KEY)
+        st.session_state["board_meeting_date"] = stored or default_meeting_date()
+    return st.session_state["board_meeting_date"]
 
 
 def set_meeting_date(meeting_date: str) -> None:
@@ -117,15 +134,91 @@ def _apply_state_to_session(state: MeetingState) -> None:
     )
 
 
-def hydrate_meeting(meeting_date: str | None = None) -> None:
+def hydrate_meeting(meeting_date: str | None = None, *, force: bool = False) -> None:
     meeting_date = meeting_date or get_meeting_date()
+    if not force and st.session_state.get("_board_hydrated_date") == meeting_date:
+        return
     state = load_meeting(meeting_date)
     _apply_state_to_session(state)
     st.session_state["_board_hydrated_date"] = meeting_date
 
 
+def init_board_session() -> None:
+    """Load the last saved board session when the app starts or refreshes."""
+    get_meeting_date()
+    hydrate_meeting()
+
+
 def persist_meeting() -> None:
-    save_meeting(_state_from_session())
+    state = _state_from_session()
+    save_meeting(state)
+    set_app_setting(LAST_BOARD_MEETING_KEY, state.meeting_date)
+
+
+def _clear_board_widget_state() -> None:
+    prefixes = (
+        "board_status_",
+        "board_question_",
+        "board_recommendation_",
+        "board_rationale_",
+        "board_follow_up_",
+        "board_action_task_",
+        "board_action_owner_",
+        "board_action_due_",
+        "board_add_action_",
+        "board_row_count_",
+        "board_queue_sorter",
+        "board_title_input",
+        "board_new_date_picker",
+        "board_new_title_input",
+        "board_add_multiselect",
+        "board_add_patients_btn",
+    )
+    for key in list(st.session_state.keys()):
+        if isinstance(key, str) and any(
+            key == prefix or key.startswith(prefix) for prefix in prefixes
+        ):
+            st.session_state.pop(key, None)
+
+
+def _reset_board_case_state() -> None:
+    st.session_state["board_queue"] = []
+    st.session_state["board_active_idx"] = 0
+    for store_key in (
+        "board_status",
+        "board_questions",
+        "board_recommendations",
+        "board_rationale",
+        "board_follow_up",
+        "board_actions",
+    ):
+        st.session_state[store_key] = {}
+
+
+def create_new_board(display_date: str, title: str = "") -> str:
+    """Start a fresh board session without loading or replacing an existing one."""
+    board_key = new_board_key(display_date)
+    set_meeting_date(board_key)
+    st.session_state["board_title"] = title.strip()
+    _reset_board_case_state()
+    st.session_state["_board_hydrated_date"] = board_key
+    _clear_board_widget_state()
+    save_meeting(
+        MeetingState(
+            meeting_date=board_key,
+            board_title=title.strip(),
+            active_idx=0,
+            cases=[],
+        )
+    )
+    set_app_setting(LAST_BOARD_MEETING_KEY, board_key)
+    return board_key
+
+
+def open_meeting(board_key: str) -> None:
+    set_meeting_date(board_key)
+    _clear_board_widget_state()
+    hydrate_meeting(board_key, force=True)
 
 
 def _persist_after(fn):
@@ -165,13 +258,17 @@ def prune_board_queue(df) -> None:
     persist_meeting()
 
 
-def add_patients_to_board(patient_ids: list[str]) -> None:
-    hydrate_meeting()
+def add_patients_to_board(patient_ids: list[str]) -> list[str]:
+    meeting_date = get_meeting_date()
+    if st.session_state.get("_board_hydrated_date") != meeting_date:
+        hydrate_meeting(meeting_date, force=True)
     ensure_board_state()
     queue = st.session_state["board_queue"]
+    added: list[str] = []
     for pid in patient_ids:
         if pid and pid not in queue:
             queue.append(pid)
+            added.append(pid)
             st.session_state["board_status"].setdefault(pid, "Ready for board")
             st.session_state["board_questions"].setdefault(pid, "")
             st.session_state["board_recommendations"].setdefault(pid, "")
@@ -179,7 +276,10 @@ def add_patients_to_board(patient_ids: list[str]) -> None:
             st.session_state["board_follow_up"].setdefault(pid, "")
             st.session_state["board_actions"].setdefault(pid, [])
     st.session_state["board_queue"] = queue
+    if added:
+        st.session_state["board_active_idx"] = queue.index(added[0])
     persist_meeting()
+    return added
 
 
 def add_patient_to_board(patient_id: str) -> bool:
@@ -202,6 +302,7 @@ def remove_from_board(patient_id: str) -> None:
         st.session_state["board_questions"],
         st.session_state["board_recommendations"],
         st.session_state["board_rationale"],
+        st.session_state["board_follow_up"],
         st.session_state["board_actions"],
     ):
         store.pop(patient_id, None)

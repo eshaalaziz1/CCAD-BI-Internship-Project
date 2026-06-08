@@ -96,6 +96,11 @@ def init_db() -> None:
                 linked_at TEXT NOT NULL,
                 prompt_version TEXT NOT NULL DEFAULT ''
             );
+
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             """
         )
         _migrate_schema(conn)
@@ -240,6 +245,62 @@ def list_meeting_dates() -> list[str]:
             "SELECT meeting_date FROM meetings ORDER BY meeting_date DESC"
         ).fetchall()
     return [row["meeting_date"] for row in rows]
+
+
+def list_meeting_summaries() -> list[dict[str, str | int]]:
+    """Return saved board sessions newest first."""
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                m.meeting_date,
+                m.board_title,
+                m.updated_at,
+                COUNT(mc.id) AS case_count
+            FROM meetings m
+            LEFT JOIN meeting_cases mc ON mc.meeting_id = m.id
+            GROUP BY m.id
+            ORDER BY m.updated_at DESC, m.meeting_date DESC
+            """
+        ).fetchall()
+    return [
+        {
+            "meeting_date": str(row["meeting_date"]),
+            "board_title": str(row["board_title"] or ""),
+            "updated_at": str(row["updated_at"]),
+            "case_count": int(row["case_count"]),
+        }
+        for row in rows
+    ]
+
+
+def get_app_setting(key: str, default: str = "") -> str:
+    init_db()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT value FROM app_settings WHERE key = ?",
+            (key,),
+        ).fetchone()
+    if row is None:
+        return default
+    return str(row["value"])
+
+
+def set_app_setting(key: str, value: str) -> None:
+    init_db()
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO app_settings (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (key, value),
+        )
+        conn.commit()
+
+
+LAST_BOARD_MEETING_KEY = "last_board_meeting_date"
 
 
 def default_meeting_date() -> str:
