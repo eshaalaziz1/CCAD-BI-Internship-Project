@@ -7,6 +7,7 @@ import html
 import logging
 import os
 import re
+import textwrap
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
@@ -455,24 +456,10 @@ def summary_to_markdown(patient_id: str, summary: str) -> str:
 
 
 def summary_to_pdf(patient_id: str, summary: str) -> bytes:
-    text = summary_to_markdown(patient_id, summary)
-    safe_text = (
-        text.replace("\r\n", "\n")
-        .replace("\r", "\n")
-        .encode("latin-1", errors="replace")
-        .decode("latin-1")
+    return _markdown_pdf_bytes(
+        f"OncoBoard MDT brief - {patient_id}",
+        summary_to_markdown(patient_id, summary),
     )
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=18)
-    pdf.set_margins(left=18, top=18, right=18)
-    pdf.add_page()
-    pdf.set_font("Helvetica", "B", 16)
-    pdf.multi_cell(0, 9, f"OncoBoard MDT brief - {patient_id}")
-    pdf.ln(3)
-    pdf.set_font("Helvetica", "", 10)
-    for line in safe_text.splitlines():
-        pdf.multi_cell(0, 5.6, line or " ")
-    return bytes(pdf.output())
 
 
 def _sync_patient_ids(df: pd.DataFrame) -> dict[str, str]:
@@ -1370,6 +1357,343 @@ def render_report_clinical_briefing(analysis: dict, report_text: str) -> None:
         )
 
 
+def _legacy_clean_display_text(value, fallback: str = "Not specified") -> str:
+    text = str(value or "").strip()
+    if not text or text.lower() in {"nan", "none", "..."}:
+        return fallback
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<unused\d+>\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"</?[^>\s]+>", "", text)
+    if re.search(
+        r"\b(thought|identify the goal|scan the report|the user wants|i need to)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return fallback
+    return " ".join(text.split())
+
+
+def _legacy_report_packet_markdown(analysis: dict, report_text: str) -> str:
+    snapshot = analysis.get("patient_snapshot") if isinstance(analysis.get("patient_snapshot"), dict) else {}
+    lines = [
+        "# OncoBoard report briefing",
+        f"Generated: {datetime.now(timezone.utc).isoformat()}",
+        "",
+        f"## Patient: {_legacy_clean_display_text(snapshot.get('name_or_id'), 'Uploaded report')}",
+        f"- Age: {_legacy_clean_display_text(snapshot.get('age'))}",
+        f"- Sex: {_legacy_clean_display_text(snapshot.get('sex'))}",
+        f"- Presenting problem: {_legacy_clean_display_text(snapshot.get('presenting_problem'))}",
+        f"- Likely issue: {_legacy_clean_display_text(snapshot.get('likely_primary_issue'))}",
+        "",
+        f"## Meeting objective\n{_legacy_clean_display_text(analysis.get('meeting_objective'), 'Clarify the key decision for this case.')}",
+        "",
+    ]
+    for title, values in [
+        ("Critical facts", analysis.get("critical_facts")),
+        ("Red flags", analysis.get("red_flags")),
+        ("Missing data", analysis.get("missing_data")),
+        ("Priority problems", analysis.get("priority_problems")),
+        ("Specialist focus", analysis.get("specialist_focus")),
+        ("Decision points", analysis.get("decision_points")),
+        ("Suggested meeting flow", analysis.get("meeting_flow")),
+    ]:
+        lines.append(f"## {title}")
+        items = _as_list(values)
+        if not items:
+            lines.append("- Not specified")
+        for item in items:
+            if isinstance(item, dict):
+                text = " | ".join(
+                    f"{key.replace('_', ' ').title()}: {_legacy_clean_display_text(value, '')}"
+                    for key, value in item.items()
+                    if _legacy_clean_display_text(value, "")
+                )
+            else:
+                text = _legacy_clean_display_text(item, "")
+            if text:
+                lines.append(f"- {text}")
+        lines.append("")
+    lines.append("## Source excerpt")
+    lines.append(report_text[:3000])
+    return "\n".join(lines)
+
+
+def _markdown_pdf_bytes(title: str, body: str) -> bytes:
+    def safe_pdf_text(value: str) -> str:
+        return (
+            str(value)
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
+            .replace("\t", "    ")
+            .replace("\u200b", "")
+            .replace("\ufeff", "")
+            .encode("latin-1", errors="replace")
+            .decode("latin-1")
+        )
+
+    safe_body = (
+        safe_pdf_text(body)
+    )
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=18)
+    pdf.set_margins(left=18, top=18, right=18)
+    pdf.add_page()
+    content_width = pdf.w - pdf.l_margin - pdf.r_margin
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.multi_cell(content_width, 9, safe_pdf_text(title)[:90])
+    pdf.ln(3)
+    pdf.set_font("Helvetica", "", 10)
+    for line in safe_body.splitlines():
+        chunks = textwrap.wrap(
+            line,
+            width=72,
+            break_long_words=True,
+            break_on_hyphens=True,
+            replace_whitespace=False,
+            drop_whitespace=True,
+        ) or [" "]
+        for chunk in chunks:
+            pdf.multi_cell(content_width, 5.6, chunk[:120])
+    return bytes(pdf.output())
+
+
+def _legacy_list(items, empty_text: str = "Not specified in the report.") -> None:
+    clean_items = [
+        _legacy_clean_display_text(item, "")
+        for item in _as_list(items)
+        if str(item).strip()
+    ]
+    clean_items = [item for item in clean_items if item]
+    if not clean_items:
+        st.caption(empty_text)
+        return
+    for item in clean_items:
+        st.markdown(f"- {item}")
+
+
+def _legacy_specialist_cards(items) -> None:
+    rows = [item for item in _as_list(items) if isinstance(item, dict)]
+    if not rows:
+        _legacy_list(items, "No specialist focus items were extracted.")
+        return
+    cards = []
+    for row in rows:
+        specialist = _legacy_clean_display_text(row.get("specialist"), "Specialist")
+        review = _legacy_clean_display_text(
+            row.get("what_they_need_to_review", row.get("review")),
+            "Review decision-relevant details for this case.",
+        )
+        cards.append(
+            "<article class='specialist-card'>"
+            f"<span>{html.escape(specialist)}</span>"
+            f"<p>{html.escape(review)}</p>"
+            "</article>"
+        )
+    st.markdown(f"<div class='specialist-grid'>{''.join(cards)}</div>", unsafe_allow_html=True)
+
+
+def _legacy_report_analysis_with_loader(report_text: str) -> dict:
+    loader = st.empty()
+    stages = [
+        (12, "Reading report"),
+        (24, "Building patient snapshot"),
+        (36, "Extracting clinical facts"),
+        (48, "Prioritizing problems"),
+        (62, "Mapping specialist focus"),
+        (76, "Finding gaps and red flags"),
+        (88, "Building meeting agenda"),
+        (90, "Finalizing board view"),
+    ]
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(analyze_report_with_mode, report_text)
+        tick = 0
+        while not future.done():
+            base_progress, stage = stages[min(tick // 5, len(stages) - 1)]
+            with loader.container():
+                render_report_loader(base_progress + min(tick % 5, 4), stage)
+            time.sleep(0.18)
+            tick += 1
+        analysis, _mode = future.result()
+
+    with loader.container():
+        render_report_loader(100, "Board view ready")
+    time.sleep(0.25)
+    loader.empty()
+    return repair_report_analysis(analysis, report_text)
+
+
+def render_legacy_report_analysis(analysis: dict, report_text: str) -> None:
+    analysis = repair_report_analysis(analysis, report_text)
+    snapshot = analysis.get("patient_snapshot") or {}
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+
+    name = _legacy_clean_display_text(snapshot.get("name_or_id"), "Uploaded report")
+    age = _legacy_clean_display_text(snapshot.get("age"), "Not specified")
+    sex = _legacy_clean_display_text(snapshot.get("sex"), "Not specified")
+    presenting_problem = _legacy_clean_display_text(snapshot.get("presenting_problem"), "Not specified in the report.")
+    likely_issue = _legacy_clean_display_text(snapshot.get("likely_primary_issue"), "Not specified in the report.")
+    objective = _legacy_clean_display_text(analysis.get("meeting_objective"), "Clarify the key clinical decision for this case.")
+    page_count = report_text.count("Page ")
+    problem_count = len(_as_list(analysis.get("priority_problems")))
+    red_flag_count = len(_as_list(analysis.get("red_flags")))
+    missing_count = len(_as_list(analysis.get("missing_data")))
+
+    st.markdown(
+        f"""
+        <section class="report-brief-hero">
+          <div class="report-brief-top">
+            <div>
+              <p class="report-eyebrow">Board briefing</p>
+              <h2>{html.escape(name)}</h2>
+              <div class="report-chip-row">
+                <span>{html.escape(age)} yrs</span>
+                <span>{html.escape(sex)}</span>
+                <span>{page_count} pages read</span>
+              </div>
+            </div>
+            <div class="report-risk-stack">
+              <div><b>{problem_count}</b><span>Problems</span></div>
+              <div><b>{red_flag_count}</b><span>Red flags</span></div>
+              <div><b>{missing_count}</b><span>Gaps</span></div>
+            </div>
+          </div>
+          <div class="report-brief-grid">
+            <article><span>Presenting problem</span><p>{html.escape(presenting_problem)}</p></article>
+            <article><span>Likely primary issue</span><p>{html.escape(likely_issue)}</p></article>
+          </div>
+          <article class="meeting-objective-card">
+            <span>Meeting objective</span>
+            <p>{html.escape(objective)}</p>
+          </article>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    packet = _legacy_report_packet_markdown(analysis, report_text)
+    pdf_col, md_col = st.columns(2)
+    pdf_col.download_button(
+        "Export report briefing PDF",
+        data=_markdown_pdf_bytes("OncoBoard report briefing", packet),
+        file_name=f"oncoboard_report_briefing_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+        mime="application/pdf",
+        use_container_width=True,
+    )
+    md_col.download_button(
+        "Export report briefing",
+        data=packet,
+        file_name=f"oncoboard_report_briefing_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+        mime="text/markdown",
+        use_container_width=True,
+    )
+
+    tab_signal, tab_charts, tab_team, tab_agenda, tab_source = st.tabs(
+        ["Clinical signal", "Vitals & timeline", "Team focus", "Meeting agenda", "Source text"]
+    )
+    with tab_signal:
+        left, right = st.columns([0.52, 0.48])
+        with left:
+            st.markdown("#### Critical facts")
+            _legacy_list(analysis.get("critical_facts"))
+            st.markdown("#### Red flags")
+            _legacy_list(analysis.get("red_flags"), "No urgent red flags were extracted.")
+        with right:
+            st.markdown("#### Missing data")
+            _legacy_list(analysis.get("missing_data"), "No missing data was extracted.")
+
+        problems = _as_list(analysis.get("priority_problems"))
+        rows = [p for p in problems if isinstance(p, dict)]
+        st.markdown("#### Priority problems")
+        if rows:
+            render_problem_cards(rows)
+        else:
+            _legacy_list(problems, "No priority problems were extracted.")
+
+    with tab_charts:
+        render_report_charts(analysis, report_text, section_label=None)
+
+    with tab_team:
+        _legacy_specialist_cards(analysis.get("specialist_focus"))
+        st.markdown("#### Decision points")
+        _legacy_list(analysis.get("decision_points"))
+
+    with tab_agenda:
+        st.markdown("#### Suggested discussion order")
+        flow = [
+            _legacy_clean_display_text(item, "")
+            for item in _as_list(analysis.get("meeting_flow"))
+            if _legacy_clean_display_text(item, "")
+        ]
+        if flow:
+            for idx, item in enumerate(flow, start=1):
+                st.markdown(f"**{idx}.** {item}")
+        else:
+            st.caption("No meeting flow was extracted.")
+
+    with tab_source:
+        st.text_area("Extracted report text", value=report_text[:30000], height=360)
+
+
+def page_legacy_report_intake(ollama_ok: bool) -> None:
+    st.subheader("Report intake")
+    st.caption(
+        "Upload a clinical PDF and convert it into a meeting-ready board briefing. "
+        "MedGemma analyzes each section separately to reduce cutoff and improve completeness."
+    )
+
+    if not ollama_ok:
+        st.warning("Start Ollama locally to enable report analysis.")
+
+    uploaded = st.file_uploader("Upload report PDF", type=["pdf"], key="legacy_report_pdf")
+    if not uploaded:
+        st.info("Upload a report to extract a patient snapshot, key facts, priority problems, specialist focus, and meeting agenda.")
+        return
+
+    try:
+        report_text = extract_pdf_text(uploaded)
+    except Exception as exc:
+        st.error(f"Could not read this PDF: {exc}")
+        return
+
+    if not report_text:
+        st.error("No readable text was found in this PDF.")
+        return
+
+    report_fingerprint = hashlib.sha256(f"{PROMPT_VERSION}\n{report_text}".encode("utf-8")).hexdigest()
+    if st.session_state.get("legacy_report_fingerprint") != report_fingerprint:
+        st.session_state.pop("legacy_report_analysis", None)
+        st.session_state.pop("legacy_report_text", None)
+        st.session_state["legacy_report_fingerprint"] = report_fingerprint
+
+    st.success(f"Extracted {len(report_text):,} characters from {uploaded.name}.")
+
+    action_col, reset_col = st.columns([0.72, 0.28])
+    button_label = "Regenerate board briefing" if st.session_state.get("legacy_report_analysis") else "Generate board briefing"
+    if action_col.button(button_label, type="primary", disabled=not ollama_ok, use_container_width=True):
+        try:
+            st.session_state["legacy_report_analysis"] = _legacy_report_analysis_with_loader(report_text)
+            st.session_state["legacy_report_text"] = report_text
+            st.session_state["legacy_report_name"] = uploaded.name
+            st.session_state["legacy_report_fingerprint"] = report_fingerprint
+        except Exception as exc:
+            st.error(f"Report analysis failed: {exc}")
+
+    if reset_col.button("Clear briefing", use_container_width=True):
+        st.session_state.pop("legacy_report_analysis", None)
+        st.session_state.pop("legacy_report_text", None)
+        st.rerun()
+
+    if st.session_state.get("legacy_report_analysis") and st.session_state.get("legacy_report_text"):
+        repaired_analysis = repair_report_analysis(
+            st.session_state["legacy_report_analysis"],
+            st.session_state["legacy_report_text"],
+        )
+        st.session_state["legacy_report_analysis"] = repaired_analysis
+        st.caption("Briefing checked against source text before display.")
+        render_legacy_report_analysis(repaired_analysis, st.session_state["legacy_report_text"])
+
+
 def render_layered_analysis(
     row: pd.Series,
     analysis: dict | None,
@@ -2184,7 +2508,7 @@ def main() -> None:
     elif nav == "Patients":
         page_patient_chart(df, ollama_ok)
     elif nav == "Report analysis":
-        page_report_analysis(df, ollama_ok)
+        page_legacy_report_intake(ollama_ok)
     elif nav == "Add patient":
         page_add_patient(df)
     else:
