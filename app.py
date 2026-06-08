@@ -1162,7 +1162,7 @@ def page_home(df: pd.DataFrame) -> None:
     preview_cols = ["patient_id", "diagnosis", "stage", "age", "sex", "source"]
     available_cols = [col for col in preview_cols if col in df.columns]
     st.dataframe(
-        df[available_cols].head(10),
+        df[available_cols],
         use_container_width=True,
         hide_index=True,
     )
