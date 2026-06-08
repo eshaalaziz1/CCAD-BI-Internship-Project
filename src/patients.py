@@ -173,6 +173,26 @@ def add_custom_patient(record: dict) -> pd.DataFrame:
     return load_all_patients()
 
 
+def update_custom_patient(record: dict) -> pd.DataFrame:
+    """Update an existing custom/synthetic patient record."""
+    custom = load_custom_patients()
+    patient_id = str(record.get("patient_id", "")).strip()
+    if not patient_id:
+        raise ValueError("Patient ID is required.")
+
+    updated = False
+    for idx, row in enumerate(custom):
+        if str(row.get("patient_id")) == patient_id:
+            source = row.get("source", "custom")
+            custom[idx] = normalize_record(record, source=source)
+            updated = True
+            break
+    if not updated:
+        raise ValueError("Only custom or synthetic patients can be updated in the registry.")
+    save_custom_patients(custom)
+    return load_all_patients()
+
+
 def delete_custom_patient(patient_id: str) -> pd.DataFrame:
     custom = [r for r in load_custom_patients() if r.get("patient_id") != patient_id]
     if len(custom) == len(load_custom_patients()):

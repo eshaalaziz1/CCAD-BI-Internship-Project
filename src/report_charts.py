@@ -25,7 +25,8 @@ CHART_THEME = dict(
     paper_bgcolor="rgba(0,0,0,0)",
     plot_bgcolor="rgba(0,0,0,0)",
     font=dict(family="sans-serif", color="#172033", size=13),
-    margin=dict(l=24, r=24, t=54, b=32),
+    margin=dict(l=48, r=72, t=64, b=56),
+    autosize=True,
 )
 
 LAB_PATTERNS: list[tuple[str, re.Pattern[str], str, float | None, float | None]] = [
@@ -45,8 +46,18 @@ LAB_PATTERNS: list[tuple[str, re.Pattern[str], str, float | None, float | None]]
 
 def _apply_theme(fig: go.Figure, height: int = 330) -> go.Figure:
     fig.update_layout(**CHART_THEME, height=height)
-    fig.update_xaxes(showgrid=True, gridcolor="rgba(217,228,239,0.72)", zeroline=False)
-    fig.update_yaxes(showgrid=True, gridcolor="rgba(217,228,239,0.72)", zeroline=False)
+    fig.update_xaxes(
+        showgrid=True,
+        gridcolor="rgba(217,228,239,0.72)",
+        zeroline=False,
+        automargin=True,
+    )
+    fig.update_yaxes(
+        showgrid=True,
+        gridcolor="rgba(217,228,239,0.72)",
+        zeroline=False,
+        automargin=True,
+    )
     return fig
 
 
@@ -237,9 +248,16 @@ def chart_vitals_and_labs(report_text: str) -> go.Figure | None:
             ),
         )
     )
-    fig.update_layout(title="Recorded numeric values from the report", yaxis_title="Recorded value", showlegend=False)
+    fig.update_layout(
+        title="Recorded numeric values from the report",
+        yaxis_title="Recorded value",
+        showlegend=False,
+    )
     fig.update_xaxes(tickangle=-18)
-    return _apply_theme(fig, height=380)
+    fig.update_yaxes(rangemode="tozero")
+    fig = _apply_theme(fig, height=380)
+    fig.update_layout(margin=dict(l=48, r=96, t=64, b=72))
+    return fig
 
 
 def chart_timeline(report_text: str) -> go.Figure | None:
@@ -270,11 +288,15 @@ def chart_timeline(report_text: str) -> go.Figure | None:
         showlegend=False,
     )
     fig.update_xaxes(autorange="reversed", dtick=1)
-    return _apply_theme(fig, height=380)
+    fig = _apply_theme(fig, height=380)
+    fig.update_layout(margin=dict(l=48, r=72, t=88, b=56))
+    return fig
 
 
 def chart_history_durations(report_text: str) -> go.Figure | None:
     df = extract_history_durations(report_text)
+    if df.empty or "Years" not in df.columns:
+        return None
     df = df[df["Years"] >= 0.01].copy()
     if df.empty:
         return None
@@ -290,8 +312,14 @@ def chart_history_durations(report_text: str) -> go.Figure | None:
             hovertemplate="<b>%{y}</b><br>%{x:g} years<br>Source: %{customdata}<extra></extra>",
         )
     )
-    fig.update_layout(title="Relevant history duration", xaxis_title="Years documented", showlegend=False)
-    return _apply_theme(fig, height=max(260, 76 * len(df)))
+    fig.update_layout(
+        title="Relevant history duration",
+        xaxis_title="Years documented",
+        showlegend=False,
+    )
+    fig = _apply_theme(fig, height=max(260, 76 * len(df)))
+    fig.update_layout(margin=dict(l=48, r=96, t=64, b=48))
+    return fig
 
 
 def _status_style(status: str) -> tuple[str, str]:
@@ -388,9 +416,9 @@ def render_measurement_cards(df: pd.DataFrame) -> None:
             margin-top: 0.55rem;
             color: #64748b;
             font-size: 0.75rem;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
+            line-height: 1.35;
+            overflow-wrap: anywhere;
+            word-break: break-word;
           }}
         </style>
         <div class="measurement-grid">{''.join(cards)}</div>
@@ -399,25 +427,31 @@ def render_measurement_cards(df: pd.DataFrame) -> None:
     )
 
 
-def render_report_charts(analysis: dict, report_text: str) -> None:
-    st.caption("Only numeric values found in the uploaded report are charted here. If the report does not contain chartable numbers, this tab will say so instead of fabricating visuals.")
-
+def render_report_charts(
+    analysis: dict,
+    report_text: str,
+    *,
+    section_label: str | None = "Uploaded report",
+) -> None:
+    if section_label:
+        st.markdown(f"#### {section_label}")
     numeric_df = _numeric_measurements(report_text)
     timeline_df = extract_symptom_timeline(report_text)
     history_df = extract_history_durations(report_text)
 
-    metric_cols = st.columns(4)
-    metric_cols[0].metric("Numeric values found", len(numeric_df))
-    metric_cols[1].metric("Symptom episodes charted", len(timeline_df))
-    metric_cols[2].metric("Abnormal/high values", int((numeric_df["Status"] == "High").sum()) if not numeric_df.empty else 0)
-    metric_cols[3].metric("History durations", len(history_df[history_df["Years"] >= 0.01]) if not history_df.empty else 0)
+    metric_cols = st.columns(3)
+    metric_cols[0].metric("Values found", len(numeric_df))
+    metric_cols[1].metric("Episodes", len(timeline_df))
+    metric_cols[2].metric(
+        "Abnormal",
+        int((numeric_df["Status"] == "High").sum()) if not numeric_df.empty else 0,
+    )
 
     vitals_chart = chart_vitals_and_labs(report_text)
     timeline_chart = chart_timeline(report_text)
     history_chart = chart_history_durations(report_text)
 
     if vitals_chart is None and timeline_chart is None and history_chart is None:
-        st.warning("This report does not contain enough numeric data for meaningful charts. The clinical text tabs are more appropriate for this upload.")
         return
 
     if vitals_chart is not None:
@@ -430,10 +464,6 @@ def render_report_charts(analysis: dict, report_text: str) -> None:
     with left:
         if timeline_chart is not None:
             st.plotly_chart(timeline_chart, use_container_width=True)
-        else:
-            st.info("No symptom timeline with numeric durations was found.")
     with right:
         if history_chart is not None:
             st.plotly_chart(history_chart, use_container_width=True)
-        else:
-            st.info("No relevant history durations were found.")

@@ -594,6 +594,53 @@ def inject_styles() -> None:
             max-width: 54rem;
             margin: 0.55rem 0 0;
           }
+          .home-hero.app-page-header,
+          .home-hero.ob-header-shell {
+            margin-bottom: 0.65rem;
+            padding: 0.62rem 1rem;
+            width: 100%;
+            max-width: 100%;
+            box-sizing: border-box;
+            overflow: hidden;
+            display: block;
+          }
+          [data-testid="stMarkdownContainer"]:has(.ob-header-shell) {
+            width: 100%;
+            max-width: 100%;
+          }
+          .home-hero.ob-header-shell h1 {
+            font-size: clamp(1.28rem, 2.4vw, 1.72rem);
+            line-height: 1.1;
+          }
+          .app-header-brand .brand-mark {
+            width: 2.35rem;
+            height: 2.35rem;
+            flex: 0 0 2.35rem;
+            font-size: 0.78rem;
+          }
+          .ob-header-shell .ob-header-status-wrap {
+            float: right;
+            width: 1.85rem;
+            height: 1.85rem;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.14);
+            border: 1px solid rgba(255, 255, 255, 0.28);
+            box-shadow: 0 7px 20px rgba(34, 57, 86, 0.07);
+          }
+          .ob-header-shell .ob-header-status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 999px;
+            display: inline-block;
+            box-shadow: 0 0 0 3px rgba(31, 138, 131, 0.12);
+            animation: statusPulse 2.4s ease-in-out infinite;
+          }
+          .ob-header-shell .brand-lockup {
+            overflow: hidden;
+          }
           .home-launch-title {
             margin: 0.55rem 0 0.5rem;
             color: var(--brand);
@@ -778,7 +825,9 @@ def inject_styles() -> None:
               linear-gradient(135deg, rgba(255,255,255,0.96), rgba(241,248,252,0.9)),
               radial-gradient(circle at 90% 8%, rgba(31,138,131,0.14), transparent 18rem);
             box-shadow: 0 24px 60px rgba(31, 53, 72, 0.14);
-            overflow: hidden;
+            overflow: visible;
+            max-width: 100%;
+            box-sizing: border-box;
             animation: fadeUp 260ms ease-out both;
           }
           .report-brief-hero::before {
@@ -790,10 +839,14 @@ def inject_styles() -> None:
           }
           .report-brief-top {
             display: grid;
-            grid-template-columns: minmax(0, 1fr) auto;
+            grid-template-columns: minmax(0, 1fr) minmax(0, max-content);
             gap: 1rem;
             align-items: start;
             padding-left: 0.15rem;
+          }
+          .report-brief-top > div {
+            min-width: 0;
+            max-width: 100%;
           }
           .report-eyebrow {
             margin: 0 0 0.3rem;
@@ -809,6 +862,8 @@ def inject_styles() -> None:
             font-size: clamp(1.7rem, 3vw, 2.45rem);
             line-height: 1.05;
             letter-spacing: 0;
+            overflow-wrap: anywhere;
+            word-break: break-word;
           }
           .report-chip-row {
             display: flex;
@@ -830,8 +885,10 @@ def inject_styles() -> None:
           }
           .report-risk-stack {
             display: grid;
-            grid-template-columns: repeat(3, minmax(5.7rem, 1fr));
+            grid-template-columns: repeat(3, minmax(4.5rem, 1fr));
             gap: 0.6rem;
+            max-width: 100%;
+            width: max-content;
           }
           .report-risk-stack div {
             border-radius: 14px;
@@ -885,6 +942,8 @@ def inject_styles() -> None:
             color: var(--ink);
             font-size: 1rem;
             line-height: 1.55;
+            overflow-wrap: anywhere;
+            word-break: break-word;
           }
           .meeting-objective-card {
             margin-top: 0.85rem;
@@ -947,12 +1006,18 @@ def inject_styles() -> None:
           .measurement-grid {
             align-items: stretch;
           }
+          div[data-testid="stMarkdownContainer"]:has(.report-brief-hero),
+          div[data-testid="stMarkdownContainer"]:has(.problem-card-grid),
+          div[data-testid="stPlotlyChart"] {
+            overflow: visible !important;
+          }
           @media (max-width: 760px) {
             .report-brief-top,
             .report-brief-grid {
               grid-template-columns: 1fr;
             }
             .report-risk-stack {
+              width: 100%;
               grid-template-columns: repeat(3, minmax(0, 1fr));
             }
             .report-risk-stack div {
@@ -1068,9 +1133,108 @@ def inject_styles() -> None:
             font-size: 0.72rem;
             font-weight: 700;
           }
-          .board-status-pill.queued { background: #e8f1f8; color: #255e7e; }
+          .board-status-pill.readyforboard { background: #e8f1f8; color: #255e7e; }
+          .board-status-pill.missingimaging { background: #fff3cd; color: #8a6d1d; }
+          .board-status-pill.needspathology { background: #fde8e8; color: #9b3d3d; }
+          .board-status-pill.needsmolecularresults { background: #f3e8ff; color: #6b3fa0; }
+          .board-status-pill.urgent { background: #ffd6d6; color: #a11919; }
           .board-status-pill.discussed { background: #d8f3dc; color: #1f6b42; }
+          .board-status-pill.decisionrecorded { background: #d4edda; color: #155724; }
+          .st-key-ai_assistant_fab {
+            position: absolute !important;
+            width: 1px !important;
+            height: 1px !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            overflow: hidden !important;
+            clip: rect(0, 0, 0, 0) !important;
+            white-space: nowrap !important;
+            border: 0 !important;
+          }
+          .ob-float-btn-wrap {
+            position: fixed !important;
+            bottom: 1.35rem !important;
+            right: 1.35rem !important;
+            z-index: 100001 !important;
+            width: 3.15rem !important;
+            height: 3.15rem !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            pointer-events: auto !important;
+          }
+          .ob-float-btn-wrap .ob-fab-decoy {
+            width: 3.15rem !important;
+            height: 3.15rem !important;
+            border-radius: 12px !important;
+            padding: 0 !important;
+            font-weight: 900 !important;
+            font-size: 0.78rem !important;
+            letter-spacing: 0.04em !important;
+            color: #ffffff !important;
+            border: 1px solid rgba(255, 255, 255, 0.32) !important;
+            cursor: pointer !important;
+            background:
+              radial-gradient(circle at 28% 20%, rgba(255,255,255,0.34), transparent 28%),
+              linear-gradient(135deg, var(--brand), var(--teal) 62%, var(--gold)) !important;
+            box-shadow: 0 14px 28px rgba(31, 138, 131, 0.28) !important;
+          }
+          .ob-float-btn-wrap .ob-fab-decoy:hover {
+            filter: brightness(1.06);
+            box-shadow: 0 16px 34px rgba(31, 138, 131, 0.34) !important;
+          }
+          body.ob-assistant-open .ob-float-btn-wrap {
+            display: none !important;
+          }
+          .st-key-ai_assistant_panel {
+            background: rgba(255, 255, 255, 0.98) !important;
+            border: 1px solid var(--line) !important;
+            border-radius: 14px !important;
+            box-shadow: 0 18px 42px rgba(34, 57, 86, 0.18) !important;
+            padding: 0.85rem 0.75rem 0.75rem !important;
+            box-sizing: border-box !important;
+            overflow-x: hidden !important;
+            overflow-y: auto !important;
+          }
+          .st-key-ai_assistant_panel.is-expanded {
+            border-radius: 0 !important;
+            padding-top: 0.95rem !important;
+          }
+          .board-status-pill.queued { background: #e8f1f8; color: #255e7e; }
           .board-status-pill.deferred { background: #fff3cd; color: #8a6d1d; }
+          .mdt-case-summary {
+            background: rgba(255,255,255,0.94);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            padding: 0.9rem 1rem;
+            margin-bottom: 0.85rem;
+            box-shadow: var(--soft-shadow);
+          }
+          .chart-hit { color: var(--ink); }
+          .chart-miss { color: #b45c63; font-style: italic; font-weight: 600; }
+          .evidence-card {
+            border: 1px solid var(--line);
+            border-left: 4px solid var(--teal);
+            border-radius: 8px;
+            padding: 0.65rem 0.75rem;
+            margin: 0.45rem 0;
+            background: #f9fcff;
+          }
+          .evidence-card-head {
+            display: flex;
+            justify-content: space-between;
+            gap: 0.5rem;
+            margin-bottom: 0.35rem;
+            font-size: 0.72rem;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+          }
+          .evidence-confidence { color: var(--brand); }
+          .evidence-source { color: var(--muted); }
+          .evidence-rec { margin: 0; font-size: 0.92rem; }
+          .evidence-reasoning { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.86rem; }
+          .evidence-missing { margin: 0.35rem 0 0; color: #9b3d3d; font-size: 0.84rem; }
+          .board-case-btn { margin-bottom: 0.35rem; }
 
           @media (max-width: 800px) {
             .workflow-strip { grid-template-columns: 1fr; }
@@ -1150,7 +1314,7 @@ def inject_styles() -> None:
             }
 
             const revealSelector = [
-              ".app-titlebar",
+              ".ob-header-shell",
               ".home-hero",
               ".home-stat-card",
               ".workflow-step",
@@ -1201,10 +1365,147 @@ def inject_styles() -> None:
 
             observeTargets();
 
+            const findFabButton = () => {
+              const wrap = rootDoc.querySelector(
+                '[data-testid="stElementContainer"].st-key-ai_assistant_fab'
+              );
+              if (wrap?.querySelector("button")) return wrap.querySelector("button");
+              return [...rootDoc.querySelectorAll('[data-testid="stElementContainer"] button')].find((btn) => {
+                const text = (btn.innerText || btn.textContent || "").trim();
+                return text === "OB";
+              });
+            };
+
+            const pinAiFab = () => {
+              const portalClass = "ob-float-btn-wrap";
+              let portal = rootDoc.querySelector(`.${portalClass}`);
+              if (!portal) {
+                portal = rootDoc.createElement("div");
+                portal.className = portalClass;
+                Object.assign(portal.style, {
+                  position: "fixed",
+                  bottom: "1.35rem",
+                  right: "1.35rem",
+                  zIndex: "100001",
+                  width: "3.15rem",
+                  height: "3.15rem",
+                  margin: "0",
+                  padding: "0",
+                  pointerEvents: "auto",
+                });
+                const decoy = rootDoc.createElement("button");
+                decoy.type = "button";
+                decoy.className = "ob-fab-decoy";
+                decoy.textContent = "OB";
+                decoy.setAttribute("aria-label", "Open MDT assistant");
+                decoy.addEventListener("click", (event) => {
+                  event.preventDefault();
+                  const realBtn = findFabButton();
+                  if (realBtn) realBtn.click();
+                });
+                portal.appendChild(decoy);
+                rootDoc.body.appendChild(portal);
+              }
+
+              const wrap = rootDoc.querySelector(
+                '[data-testid="stElementContainer"].st-key-ai_assistant_fab'
+              );
+              if (!wrap) return;
+
+              if (wrap.parentElement?.classList?.contains(portalClass)) {
+                const appRoot = rootDoc.querySelector('[data-testid="stAppViewContainer"] .main');
+                if (appRoot) appRoot.prepend(wrap);
+              }
+            };
+
+            const pinAssistantPanel = () => {
+              const panel = rootDoc.querySelector(".st-key-ai_assistant_panel");
+              const stateMarker = rootDoc.querySelector(".ob-assistant-state");
+              const fabPortal = rootDoc.querySelector(".ob-float-btn-wrap");
+              const topGapPx = 44;
+              const sideGapPx = 22;
+
+              // Legacy portal from earlier builds — remove so it cannot intercept clicks.
+              rootDoc.querySelector(".ob-assistant-portal")?.remove();
+
+              if (!panel) {
+                rootDoc?.body?.classList?.remove("ob-assistant-open");
+                if (fabPortal) fabPortal.style.display = "";
+                return;
+              }
+
+              rootDoc.body.classList.add("ob-assistant-open");
+
+              const minimized = stateMarker?.classList.contains("is-minimized");
+              panel.classList.toggle("is-minimized", !!minimized);
+              panel.classList.toggle("is-expanded", !minimized);
+
+              // Keep panel in Streamlit DOM (buttons work) but pin visually to viewport.
+              let node = panel.parentElement;
+              let depth = 0;
+              while (node && node !== rootDoc.body && depth < 30) {
+                node.style.setProperty("transform", "none", "important");
+                node.style.setProperty("filter", "none", "important");
+                node = node.parentElement;
+                depth += 1;
+              }
+
+              panel.style.setProperty("position", "fixed", "important");
+              panel.style.setProperty("z-index", "100000", "important");
+              panel.style.setProperty("margin", "0", "important");
+              panel.style.setProperty("box-sizing", "border-box", "important");
+              panel.style.setProperty("transform", "none", "important");
+
+              if (minimized) {
+                panel.style.setProperty("top", `${topGapPx}px`, "important");
+                panel.style.setProperty("right", `${sideGapPx}px`, "important");
+                panel.style.setProperty("left", "auto", "important");
+                panel.style.setProperty("bottom", `${sideGapPx}px`, "important");
+                panel.style.setProperty("width", "clamp(320px, 33vw, 560px)", "important");
+                panel.style.setProperty(
+                  "height",
+                  `calc(100vh - ${topGapPx + sideGapPx}px)`,
+                  "important"
+                );
+              } else {
+                panel.style.setProperty("top", `${topGapPx}px`, "important");
+                panel.style.setProperty("right", "0", "important");
+                panel.style.setProperty("left", "0", "important");
+                panel.style.setProperty("bottom", "0", "important");
+                panel.style.setProperty("width", "100%", "important");
+                panel.style.setProperty("height", `calc(100vh - ${topGapPx}px)`, "important");
+              }
+
+              // Compensate when fixed is still offset by a transformed ancestor.
+              const rect = panel.getBoundingClientRect();
+              const dx = minimized ? 0 : -rect.left;
+              const dy = topGapPx - rect.top;
+              if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+                panel.style.setProperty(
+                  "transform",
+                  `translate(${dx}px, ${dy}px)`,
+                  "important"
+                );
+              }
+
+              if (fabPortal) fabPortal.style.display = "none";
+            };
+
+            pinAiFab();
+            pinAssistantPanel();
+            window.setInterval(() => {
+              pinAiFab();
+              pinAssistantPanel();
+            }, 350);
+
             if (window.__tbaMutationObserver) window.__tbaMutationObserver.disconnect();
             window.__tbaMutationObserver = new MutationObserver(() => {
               window.clearTimeout(window.__tbaRevealTimer);
-              window.__tbaRevealTimer = window.setTimeout(observeTargets, 80);
+              window.__tbaRevealTimer = window.setTimeout(() => {
+                observeTargets();
+                pinAiFab();
+                pinAssistantPanel();
+              }, 80);
             });
             window.__tbaMutationObserver.observe(rootDoc.body, { childList: true, subtree: true });
           })();

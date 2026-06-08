@@ -7,6 +7,7 @@ import logging
 import re
 import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import ollama
@@ -49,6 +50,7 @@ __all__ = [
     "PROMPT_VERSION",
     "analyze_report",
     "check_ollama_reachable",
+    "heuristic_report_analysis",
     "repair_report_analysis",
     "summarize_patient",
     "stream_summarize_patient",
@@ -127,6 +129,31 @@ One sentence.
 
 9. Suggested meeting flow
 - Up to 5 bullets.
+
+Report text:
+{clipped_report}
+""".strip()
+
+
+def build_report_analysis_json_prompt(report_text: str) -> str:
+    clipped_report = _clean_report_noise(report_text)[:18000]
+    return f"""
+You are preparing a multidisciplinary tumor board briefing.
+
+Use ONLY the report text below. Do not invent facts.
+Return ONE valid JSON object with exactly these keys:
+
+- patient_snapshot: object with keys name_or_id, age, sex, presenting_problem, likely_primary_issue
+- meeting_objective: string (one concrete sentence)
+- critical_facts: array of 5-8 short strings (specific symptoms, exam, labs, history from the report)
+- priority_problems: array of objects, each with problem, evidence, why_it_matters
+- specialist_focus: array of objects, each with specialist, what_they_need_to_review
+- missing_data: array of up to 6 strings (specific gaps)
+- red_flags: array of up to 5 strings (urgent findings only, or one item saying none found)
+- decision_points: array of up to 6 meeting questions
+- meeting_flow: array of 4-5 short discussion steps
+
+No markdown fences, no commentary, no extra keys.
 
 Report text:
 {clipped_report}
@@ -340,6 +367,125 @@ def _extract_report_json(text: str) -> dict | None:
         if isinstance(data, dict) and any(data.get(key) for key in REPORT_ANALYSIS_FIELDS):
             return data
     return None
+
+
+def _coerce_problem_rows(items) -> list[dict]:
+    rows: list[dict] = []
+    for item in _as_list(items):
+        if isinstance(item, dict):
+            problem = _strip_model_noise(item.get("problem", ""))
+            if _is_missing_value(problem):
+                continue
+            rows.append(
+                {
+                    "problem": problem,
+                    "evidence": _strip_model_noise(
+                        item.get("evidence", item.get("Evidence", ""))
+                    ),
+                    "why_it_matters": _strip_model_noise(
+                        item.get("why_it_matters", item.get("why", item.get("Why it matters", "")))
+                    ),
+                }
+            )
+        else:
+            text = _strip_model_noise(str(item))
+            if text and not _looks_like_reasoning(text):
+                parsed = _parse_problem_rows(_bullet_lines(text))
+                if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+                    rows.extend(parsed)  # type: ignore[arg-type]
+                else:
+                    rows.append(
+                        {
+                            "problem": text,
+                            "evidence": "See report text.",
+                            "why_it_matters": "Discuss during meeting.",
+                        }
+                    )
+    return rows[:6]
+
+
+def _coerce_focus_rows(items) -> list[dict]:
+    rows: list[dict] = []
+    for item in _as_list(items):
+        if isinstance(item, dict):
+            specialist = _strip_model_noise(item.get("specialist", ""))
+            review = _strip_model_noise(
+                item.get("what_they_need_to_review", item.get("review", ""))
+            )
+            if specialist:
+                rows.append({"specialist": specialist, "what_they_need_to_review": review})
+        else:
+            text = _strip_model_noise(str(item))
+            if not text:
+                continue
+            parsed = _parse_focus_rows(_bullet_lines(text))
+            if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+                rows.extend(parsed)  # type: ignore[arg-type]
+            else:
+                rows.append({"specialist": "Specialist", "what_they_need_to_review": text})
+    return rows[:5]
+
+
+def _normalize_report_json(data: dict) -> dict:
+    snapshot = data.get("patient_snapshot")
+    if isinstance(snapshot, str):
+        snapshot = _parse_key_value_lines(snapshot.replace("|", "\n"))
+    elif not isinstance(snapshot, dict):
+        snapshot = {}
+
+    objective = data.get("meeting_objective", "")
+    if isinstance(objective, list):
+        objective = " ".join(str(x) for x in objective)
+
+    return {
+        "patient_snapshot": snapshot,
+        "meeting_objective": _strip_model_noise(str(objective)),
+        "critical_facts": _clean_text_list(data.get("critical_facts"), 8),
+        "priority_problems": _coerce_problem_rows(data.get("priority_problems")),
+        "specialist_focus": _coerce_focus_rows(data.get("specialist_focus")),
+        "missing_data": _clean_text_list(data.get("missing_data"), 6),
+        "red_flags": _clean_text_list(data.get("red_flags"), 5),
+        "decision_points": _clean_text_list(data.get("decision_points"), 6),
+        "meeting_flow": _clean_text_list(data.get("meeting_flow"), 5),
+    }
+
+
+def _merge_report_partials(*partials: dict | None) -> dict:
+    merged: dict = {}
+    for partial in partials:
+        if not partial:
+            continue
+        for key, value in partial.items():
+            if value is None or value == "" or value == []:
+                continue
+            if key == "patient_snapshot":
+                if not isinstance(value, dict):
+                    continue
+                base = merged.get("patient_snapshot")
+                if not isinstance(base, dict):
+                    base = {}
+                for snap_key, snap_val in value.items():
+                    if snap_val and not _is_missing_value(snap_val):
+                        base[snap_key] = snap_val
+                merged["patient_snapshot"] = base
+            elif key == "meeting_objective":
+                text = _strip_model_noise(str(value))
+                if text and not _is_missing_value(text):
+                    merged[key] = text
+            elif isinstance(value, list):
+                existing = merged.get(key, [])
+                if not isinstance(existing, list):
+                    merged[key] = list(value)
+                elif key == "priority_problems":
+                    merged[key] = (_coerce_problem_rows(existing) + _coerce_problem_rows(value))[:6]
+                elif key == "specialist_focus":
+                    merged[key] = (_coerce_focus_rows(existing) + _coerce_focus_rows(value))[:5]
+                else:
+                    seen = {str(x) for x in existing}
+                    merged[key] = existing + [x for x in value if str(x) not in seen]
+            elif value:
+                merged[key] = value
+    return merged
 
 
 def _bullet_lines(text: str) -> list[str]:
@@ -732,87 +878,173 @@ def _parse_focus_rows(lines: list[str]) -> list[dict] | list[str]:
     return rows if rows else fallback
 
 
-def analyze_report(report_text: str, model: str = MODEL) -> dict:
-    """Turn a long clinical report into a meeting-ready board briefing."""
+def heuristic_report_analysis(report_text: str) -> dict:
+    """Fast rule-based extraction — no LLM call."""
+    return _heuristic_report_analysis(report_text)
+
+
+def _analysis_has_signal(analysis: dict) -> bool:
+    facts = _clean_text_list(analysis.get("critical_facts"), 8)
+    problems = analysis.get("priority_problems") or []
+    red_flags = _clean_text_list(analysis.get("red_flags"), 5)
+    objective = _strip_model_noise(str(analysis.get("meeting_objective", "")))
+    snapshot = analysis.get("patient_snapshot") if isinstance(analysis.get("patient_snapshot"), dict) else {}
+    presenting = _strip_model_noise(str(snapshot.get("presenting_problem", "")))
+    return bool(
+        facts
+        or problems
+        or red_flags
+        or (objective and not _is_missing_value(objective))
+        or (presenting and not _is_missing_value(presenting))
+    )
+
+
+def _finalize_report_analysis(analysis: dict, report_text: str) -> dict:
+    repaired = _repair_report_analysis(analysis, report_text)
+    if not _analysis_has_signal(repaired):
+        raise ValueError("Report analysis returned no usable clinical content.")
+    return repaired
+
+
+def _analyze_report_combined_json(report_text: str, model: str = MODEL) -> dict:
+    """One structured JSON pass — fast and preserves all briefing sections."""
+    response = _chat(
+        build_report_analysis_json_prompt(report_text),
+        model,
+        stream=False,
+        json_mode=True,
+        options={"num_predict": 2200, "temperature": 0.1, "num_ctx": 8192},
+    )
+    raw = _strip_model_noise(response["message"]["content"])
+    data = _extract_report_json(raw)
+    if not data:
+        raise ValueError("JSON report analysis could not be parsed.")
+    normalized = _normalize_report_json(data)
+    return _finalize_report_analysis(normalized, report_text)
+
+
+def _analyze_report_combined_markdown(report_text: str, model: str = MODEL) -> dict:
+    """One markdown pass — backup when JSON mode fails."""
+    response = _chat(
+        build_report_analysis_prompt(report_text),
+        model,
+        stream=False,
+        json_mode=False,
+        options={"num_predict": 2000, "temperature": 0.1, "num_ctx": 8192},
+    )
+    raw = _strip_model_noise(response["message"]["content"])
+    parsed = _parse_report_markdown(raw)
+    if not parsed:
+        raise ValueError("Markdown report analysis could not be parsed.")
+    if isinstance(parsed.get("priority_problems"), list):
+        parsed["priority_problems"] = _coerce_problem_rows(parsed["priority_problems"])
+    if isinstance(parsed.get("specialist_focus"), list):
+        parsed["specialist_focus"] = _coerce_focus_rows(parsed["specialist_focus"])
+    return _finalize_report_analysis(parsed, report_text)
+
+
+def _analyze_report_grouped(report_text: str, model: str = MODEL) -> dict:
+    """Three parallel MedGemma passes — ~3x faster than nine sections, high detail."""
+    groups = [
+        (
+            "clinical_core",
+            "Extract the patient snapshot, meeting objective, and critical facts for tumor board.",
+            (
+                "Return exactly three numbered sections:\n"
+                "1. Patient snapshot — lines: Name/ID, Age, Sex, Presenting problem, Likely primary issue\n"
+                "2. Meeting objective — one sentence\n"
+                "3. Critical facts — 5 to 8 bullets with specific report details"
+            ),
+            1000,
+        ),
+        (
+            "problems_team",
+            "Extract priority problems, specialist focus, and red flags for tumor board.",
+            (
+                "Return exactly three numbered sections:\n"
+                "4. Priority problems — up to 6 bullets: Problem: ... | Evidence: ... | Why it matters: ...\n"
+                "5. Specialist focus — up to 5 bullets: Specialist: ... | Review: ...\n"
+                "7. Red flags — up to 5 urgent bullets from the report"
+            ),
+            1200,
+        ),
+        (
+            "meeting_wrap",
+            "Extract missing data, decision points, and meeting flow for tumor board.",
+            (
+                "Return exactly three numbered sections:\n"
+                "6. Missing data — up to 6 specific gaps\n"
+                "8. Decision points — up to 6 concrete meeting questions\n"
+                "9. Suggested meeting flow — 4 to 5 steps using this case"
+            ),
+            900,
+        ),
+    ]
+
+    partials: list[dict | None] = []
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {
+            executor.submit(_run_report_section, report_text, task, rule, num_predict=n): name
+            for name, task, rule, n in groups
+        }
+        for future in as_completed(futures):
+            text = future.result()
+            partial = _parse_report_markdown(text)
+            if partial:
+                if isinstance(partial.get("priority_problems"), list):
+                    partial["priority_problems"] = _coerce_problem_rows(partial["priority_problems"])
+                if isinstance(partial.get("specialist_focus"), list):
+                    partial["specialist_focus"] = _coerce_focus_rows(partial["specialist_focus"])
+            partials.append(partial)
+
+    merged = _merge_report_partials(*partials)
+    if not merged:
+        raise ValueError("Grouped report analysis returned no sections.")
+    return _finalize_report_analysis(merged, report_text)
+
+
+def _analyze_report_pipeline(report_text: str, model: str = MODEL) -> tuple[dict, str]:
+    """Fast path with quality fallbacks. Returns (analysis, mode_label)."""
     report_text = _clean_report_noise(report_text)
     start = time.perf_counter()
-    try:
-        snapshot_text = _run_report_section(
-            report_text,
-            "Extract the patient snapshot.",
-            "Return exactly five fields using this format: Name/ID: ... | Age: ... | Sex: ... | Presenting problem: ... | Likely primary issue: ...",
-            num_predict=260,
-        )
-        objective_text = _run_report_section(
-            report_text,
-            "State the meeting objective.",
-            "Return one concrete sentence about what the team must decide or clarify for this patient.",
-            num_predict=180,
-        )
-        facts_text = _run_report_section(
-            report_text,
-            "Extract the most decision-relevant clinical facts.",
-            "Return 5 to 8 bullets. Include specific symptoms, diagnoses, history, exam findings, test results, treatments, or risks that are explicitly in the report.",
-            num_predict=650,
-        )
-        problems_text = _run_report_section(
-            report_text,
-            "Identify the priority problems for discussion.",
-            "Return up to 6 bullets using exactly: Problem: ... | Evidence: quote or paraphrase the report support | Why it matters: meeting relevance. Do not include problems without report evidence.",
-            num_predict=850,
-        )
-        focus_text = _run_report_section(
-            report_text,
-            "Map the case to specialists who should contribute to the meeting.",
-            "Return up to 5 bullets using exactly: Specialist: ... | Review: specific question or evidence they should review. Use only specialties justified by the report.",
-            num_predict=650,
-        )
-        missing_text = _run_report_section(
-            report_text,
-            "Identify missing information needed before a confident decision.",
-            "Return up to 6 bullets. Each gap must be specific, such as a named lab, imaging result, medication detail, timeline, risk factor, or pending test. If no specific gap is apparent, return '- Not specified in the report.'",
-            num_predict=500,
-        )
-        red_flags_text = _run_report_section(
-            report_text,
-            "Identify urgent or high-risk red flags.",
-            "Return up to 5 bullets. Include only urgent or high-risk findings explicitly supported by the report. If none, return '- No urgent red flags extracted from the report.'",
-            num_predict=450,
-        )
-        decisions_text = _run_report_section(
-            report_text,
-            "List the decision points the team should answer.",
-            "Return up to 6 bullets phrased as concrete meeting questions. Each question must connect to the extracted problems, gaps, or red flags.",
-            num_predict=550,
-        )
-        flow_text = _run_report_section(
-            report_text,
-            "Create a practical meeting flow for discussing this patient quickly.",
-            "Return 4 to 5 numbered or bulleted steps. Use the actual case content, not generic meeting steps.",
-            num_predict=450,
-        )
 
-        analysis = {
-            "patient_snapshot": _parse_key_value_lines(snapshot_text.replace("|", "\n")),
-            "meeting_objective": " ".join(_bullet_lines(objective_text)),
-            "critical_facts": _bullet_lines(facts_text),
-            "priority_problems": _parse_problem_rows(_bullet_lines(problems_text)),
-            "specialist_focus": _parse_focus_rows(_bullet_lines(focus_text)),
-            "missing_data": _bullet_lines(missing_text),
-            "red_flags": _bullet_lines(red_flags_text),
-            "decision_points": _bullet_lines(decisions_text),
-            "meeting_flow": _bullet_lines(flow_text),
-        }
-        logger.info(
-            "report_analysis_ok model=%s prompt=%s latency_sec=%.2f sectioned=true",
-            model,
-            PROMPT_VERSION,
-            time.perf_counter() - start,
-        )
-        return _repair_report_analysis(analysis, report_text)
-    except Exception as exc:
-        logger.warning("report_analysis_falling_back_to_heuristic error=%s", exc)
-        return _repair_report_analysis(_heuristic_report_analysis(report_text), report_text)
+    for mode, runner in (
+        ("combined_json", _analyze_report_combined_json),
+        ("combined_markdown", _analyze_report_combined_markdown),
+        ("grouped_parallel", _analyze_report_grouped),
+    ):
+        try:
+            analysis = runner(report_text, model)
+            logger.info(
+                "report_analysis_ok model=%s prompt=%s latency_sec=%.2f mode=%s",
+                model,
+                PROMPT_VERSION,
+                time.perf_counter() - start,
+                mode,
+            )
+            return analysis, mode
+        except Exception as exc:
+            logger.warning("report_analysis_mode_failed mode=%s error=%s", mode, exc)
+
+    heuristic = _repair_report_analysis(_heuristic_report_analysis(report_text), report_text)
+    logger.info(
+        "report_analysis_ok model=%s prompt=%s latency_sec=%.2f mode=heuristic",
+        model,
+        PROMPT_VERSION,
+        time.perf_counter() - start,
+    )
+    return heuristic, "heuristic"
+
+
+def analyze_report_with_mode(report_text: str, model: str = MODEL) -> tuple[dict, str]:
+    """Turn a clinical report into a briefing; returns (analysis, mode_label)."""
+    return _analyze_report_pipeline(report_text, model)
+
+
+def analyze_report(report_text: str, model: str = MODEL) -> dict:
+    """Turn a long clinical report into a meeting-ready board briefing."""
+    analysis, _mode = analyze_report_with_mode(report_text, model)
+    return analysis
 
 
 def _summarize_once(patient_data: str, model: str, *, json_mode: bool) -> tuple[str, str]:
