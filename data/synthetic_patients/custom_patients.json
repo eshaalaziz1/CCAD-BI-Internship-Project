@@ -142,5 +142,23 @@
     "notes": "Patient presents with rapidly enlarging left axillary mass. Initial biopsy confirms DLBCL. Pending further workup.",
     "intake_text": "35-year-old female with newly diagnosed Diffuse Large B-cell Lymphoma. Presents with rapidly enlarging left axillary mass. Initial biopsy confirms DLBCL, GCB subtype. Pending further workup.",
     "source": "synthetic"
+  },
+  {
+    "patient_id": "P019",
+    "age": 35,
+    "sex": "M",
+    "diagnosis": "Acute Myeloid Leukemia (AML)",
+    "stage": "R0",
+    "ecog": 2,
+    "biomarkers": "FLT3-ITD mutation positive",
+    "imaging": "CT Chest/Abdomen/Pelvis: No significant findings.",
+    "pathology": "Bone marrow biopsy confirms AML with FLT3-ITD mutation. Peripheral blood smear shows hypercellularity with blasts.",
+    "comorbidities": "Hypertension, Type 2 Diabetes Mellitus",
+    "medications": "Ibuprofen PRN pain, Metformin 850mg BID",
+    "pending_tests": "Flow cytometry for CD34/CD123 expression; FISH for RUNX1T1 and NUP98 mutations",
+    "prior_treatment": "None",
+    "notes": "Patient presents with fatigue and left leg pain. Initial labs show elevated WBC count with myeloid predominance.",
+    "intake_text": "New patient presenting with symptoms suggestive of leukemia. Bone marrow biopsy confirms AML, FLT3-ITD positive. Patient is currently asymptomatic except for mild fatigue. No prior treatment history.",
+    "source": "synthetic"
   }
 ]

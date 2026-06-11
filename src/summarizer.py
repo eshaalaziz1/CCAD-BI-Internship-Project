@@ -221,7 +221,13 @@ def _looks_like_reasoning(text: str) -> bool:
 def _is_missing_value(value) -> bool:
     text = str(value or "").strip()
     placeholders = {"...", "N/A", "None", "Uploaded report", "Uploaded Report", "Not specified"}
-    return not text or text in placeholders or _looks_like_reasoning(text)
+    return (
+        not text
+        or text in placeholders
+        or text.lower().startswith("not specified")
+        or text.lower().startswith("no structured")
+        or _looks_like_reasoning(text)
+    )
 
 
 def _as_list(value) -> list:
@@ -520,30 +526,47 @@ def _sex_label(raw: str) -> str:
     return raw.strip() or "Not specified"
 
 
+def _clean_patient_name(raw: str) -> str:
+    text = _strip_model_noise(str(raw or "")).strip()
+    text = re.sub(r"^(?:of\s+patient|patient|name)\s*:?\s*", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"\s+", " ", text)
+    if not text or _is_missing_value(text):
+        return "Uploaded report"
+    if _is_form_boilerplate_line(text) or len(text) > 90:
+        return "Uploaded report"
+    return text
+
+
 def _derive_snapshot(report_text: str) -> dict:
     text = _clean_report_noise(report_text)
-    name_match = re.search(r"Patient Name:\s*([^\n]+)", text, flags=re.IGNORECASE)
-    age_sex_match = re.search(r"(\d{1,3})\s*y/o\s*([A-Z]+)", text, flags=re.IGNORECASE)
+    name_match = re.search(
+        r"(?:Patient\s+Name|Name|Patient)[:\s]+([A-Z][^\n,]{1,80}(?:,\s*[A-Z][^\n]{1,60})?)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    age_sex_match = re.search(
+        r"(\d{1,3})[^\S\r\n]*(?:y/o|yo|year[- ]old|years? old|yrs?)[^\S\r\n]*(?:old)?[^\S\r\n]*(F|M|female|male|man|woman)?",
+        text,
+        flags=re.IGNORECASE,
+    )
     chief_match = re.search(
-        r"Chief Complaint.*?:\s*(.*?)(?:\n\s*\n|History of Present Illness)",
+        r"(?:Chief Complaint|Reason for Visit|Presenting Complaint|Indication|Referral Reason|History of Present Illness|HPI).*?:\s*(.*?)(?:\n\s*\n|Assessment|Impression|Diagnosis|Plan|Findings|Past Medical History)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
     chief = " ".join(chief_match.group(1).split()) if chief_match else ""
     if not chief:
         pain_match = re.search(r"having\s+([^.\n]*chest pain[^.\n]*)", text, flags=re.IGNORECASE)
-        chief = pain_match.group(1).strip() if pain_match else "Not specified in the report."
+        chief = pain_match.group(1).strip() if pain_match else _generic_problem_from_report(text)
 
-    likely_issue = "Chest pain with concern for cardiac ischemia"
-    if not re.search(r"chest pains?|chest pain", text, re.IGNORECASE):
-        likely_issue = chief or "Not specified in the report."
+    likely_issue = "Chest pain with concern for cardiac ischemia" if re.search(r"chest pains?|chest pain", text, re.IGNORECASE) else chief
 
     return {
-        "name_or_id": name_match.group(1).strip() if name_match else "Uploaded report",
+        "name_or_id": _clean_patient_name(name_match.group(1) if name_match else "Uploaded report"),
         "age": age_sex_match.group(1) if age_sex_match else "Not specified",
-        "sex": _sex_label(age_sex_match.group(2)) if age_sex_match else "Not specified",
-        "presenting_problem": chief,
-        "likely_primary_issue": likely_issue,
+        "sex": _sex_label(age_sex_match.group(2) or "") if age_sex_match else "Not specified",
+        "presenting_problem": chief or "Not specified in the report.",
+        "likely_primary_issue": likely_issue or "Not specified in the report.",
     }
 
 
@@ -586,7 +609,9 @@ def _derive_key_facts(report_text: str) -> list[str]:
         facts.append("Family history suggests premature coronary artery disease risk.")
     if re.search(r"systolic.*murmur|abdominal bruit", text, re.IGNORECASE):
         facts.append("Exam documents a systolic murmur and/or abdominal bruit.")
-    return facts[:8]
+    if facts:
+        return facts[:8]
+    return _generic_key_facts(text)
 
 
 def _derive_priority_problems(report_text: str) -> list[dict]:
@@ -632,7 +657,9 @@ def _derive_priority_problems(report_text: str) -> list[dict]:
                 "why_it_matters": "May affect diagnostic workup and vascular/cardiac assessment.",
             }
         )
-    return problems[:6]
+    if problems:
+        return problems[:6]
+    return _generic_priority_problems(text)
 
 
 def _derive_red_flags(report_text: str) -> list[str]:
@@ -644,7 +671,356 @@ def _derive_red_flags(report_text: str) -> list[str]:
         flags.append("Blood pressure is elevated at 168/98 mmHg.")
     if re.search(r"shortness of breath", text, re.IGNORECASE):
         flags.append("Chest pain is associated with shortness of breath.")
+    if flags:
+        return flags[:5]
+    return _generic_red_flags(text)
+
+
+def _section_after_heading(text: str, headings: list[str], stop_headings: list[str] | None = None) -> str:
+    stop_headings = stop_headings or [
+        "assessment", "impression", "diagnosis", "findings", "plan", "history", "medications",
+        "allergies", "labs", "laboratory", "imaging", "pathology", "recommendations",
+    ]
+    heading_pattern = "|".join(re.escape(h) for h in headings)
+    stop_pattern = "|".join(re.escape(h) for h in stop_headings if h.lower() not in {x.lower() for x in headings})
+    match = re.search(
+        rf"(?:^|\n)\s*(?:{heading_pattern})\s*:?\s*(.*?)(?=\n\s*(?:{stop_pattern})\s*:|\Z)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return " ".join(match.group(1).split()) if match else ""
+
+
+def _split_report_candidates(text: str, limit: int = 8) -> list[str]:
+    lines = []
+    for raw in text.splitlines():
+        line = re.sub(r"^(?:[-*•]\s+|\d+[.)]\s+)", "", raw.strip())
+        line = line.replace("☒", "").replace("☐", "").replace("□", "")
+        line = " ".join(line.split())
+        if _is_form_boilerplate_line(line) or _is_report_header_line(line):
+            continue
+        if 18 <= len(line) <= 240:
+            lines.append(line)
+    if len(lines) < 3:
+        chunks = re.split(r"(?<=[.!?])\s+", " ".join(text.split()))
+        lines.extend(
+            chunk.strip()
+            for chunk in chunks
+            if 30 <= len(chunk.strip()) <= 220
+            and not _is_form_boilerplate_line(chunk)
+            and not _is_report_header_line(chunk)
+        )
+    seen = set()
+    unique = []
+    for line in lines:
+        key = line.lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(line)
+        if len(unique) >= limit:
+            break
+    return unique
+
+
+def _is_report_header_line(line: str) -> bool:
+    lowered = (line or "").strip().lower()
+    if re.match(r"^(page|date|dob|mrn|phone|fax|section)\b", lowered):
+        return True
+    if re.match(r"^(report\s+of\s+patient|patient\s*:|name\s*:)", lowered):
+        return True
+    if re.fullmatch(r"(?:report\s+of\s+patient|patient|name)\s*:?\s*[\w .,'-]{2,90}", lowered):
+        return True
+    if re.fullmatch(r"age\s*:?\s*\d{1,3}\s*(?:years?|yrs?)?", lowered):
+        return True
+    return False
+
+
+def _is_form_boilerplate_line(line: str) -> bool:
+    lowered = (line or "").lower()
+    boilerplate_markers = [
+        "in your opinion",
+        "can the patient",
+        "does the patient",
+        "taking into consideration",
+        "personal welfare",
+        "property and affairs",
+        "mental capacity",
+        "weigh information",
+        "retain information",
+        "communicate his or her decision",
+        "make a decision relating",
+        "yes no",
+        "yes  no",
+        "opinion on patient",
+        "opinion on patient's mental capacity",
+        "relating to his or her personal welfare",
+        "relating to his or her property and affairs",
+    ]
+    if any(marker in lowered for marker in boilerplate_markers):
+        return True
+    checkbox_count = sum(line.count(token) for token in ("☒", "☐", "□", "▪", "�"))
+    checkbox_count += sum(line.count(token) for token in ("☒", "☐", "□"))
+    return checkbox_count >= 1
+
+
+def _looks_like_nonclinical_form(text: str) -> bool:
+    lowered = (text or "").lower()
+    capacity_hits = sum(
+        marker in lowered
+        for marker in [
+            "mental capacity",
+            "personal welfare",
+            "property and affairs",
+            "can the patient retain information",
+            "can the patient weigh information",
+            "can the patient understand information",
+            "communicate his or her decision",
+            "decision relating to his or her",
+            "in your opinion",
+            "opinion on patient's mental capacity",
+        ]
+    )
+    clinical_hits = sum(
+        marker in lowered
+        for marker in [
+            "diagnosis",
+            "impression",
+            "assessment",
+            "findings",
+            "pathology",
+            "biopsy",
+            "metastasis",
+            "treatment",
+            "medication",
+            "lab",
+            "ct ",
+            "mri",
+            "oncology",
+            "cancer",
+            "tumor",
+            "tumour",
+            "staging",
+        ]
+    )
+    checkbox_hits = sum(text.count(token) for token in ("☒", "☐", "□", "â˜’", "â˜", "â–¡"))
+    return (capacity_hits >= 2 or checkbox_hits >= 4) and clinical_hits < 3
+
+
+def _looks_like_capacity_assessment(text: str) -> bool:
+    lowered = (text or "").lower()
+    markers = [
+        "mental capacity",
+        "personal welfare",
+        "property and affairs",
+        "retain information",
+        "weigh information",
+        "communicate his or her decision",
+        "make a decision",
+        "cognitive function",
+        "cognitive functions",
+        "dementia",
+        "remember where",
+        "basic arithmetic",
+        "currently on medication",
+    ]
+    return sum(marker in lowered for marker in markers) >= 2
+
+
+def _first_matching_fact(facts: list[str], terms: list[str]) -> str:
+    for fact in facts:
+        lowered = fact.lower()
+        if any(term in lowered for term in terms):
+            return fact
+    return ""
+
+
+def _capacity_red_flags(text: str) -> list[str]:
+    flags = []
+    lowered = text.lower()
+    if any(term in lowered for term in ("worse over time", "unlikely to improve", "dementia")):
+        flags.append("Report suggests progressive or non-reversible cognitive decline.")
+    if any(term in lowered for term in ("currently on medication", "medical problems")):
+        flags.append("Patient may be unable to report medical problems or medication status reliably.")
+    if any(term in lowered for term in ("property", "affairs", "personal welfare")):
+        flags.append("Capacity concerns may affect welfare or property decisions.")
     return flags[:5]
+
+
+def _capacity_assessment_analysis(report_text: str) -> dict:
+    snapshot = _derive_snapshot(report_text)
+    text = _clean_report_noise(report_text)
+    facts = _split_report_candidates(text, 10)
+    if not facts:
+        return _nonclinical_form_analysis(report_text)
+
+    lowered = text.lower()
+    priority: list[dict[str, str]] = []
+    if any(term in lowered for term in ("remember", "retain information", "cognitive")):
+        priority.append(
+            {
+                "problem": "Impaired memory and information retention",
+                "evidence": _first_matching_fact(facts, ["remember", "retain", "cognitive"]) or facts[0],
+                "why_it_matters": "The team needs to know whether the patient can understand and retain information long enough to make decisions.",
+            }
+        )
+    if any(term in lowered for term in ("weigh information", "arithmetic", "notes and coins", "decision")):
+        priority.append(
+            {
+                "problem": "Difficulty weighing or using information",
+                "evidence": _first_matching_fact(facts, ["weigh", "arithmetic", "notes", "coins", "decision"]) or facts[0],
+                "why_it_matters": "This affects whether the patient can compare options and make a realistic plan.",
+            }
+        )
+    if any(term in lowered for term in ("dementia", "worse over time", "unlikely to improve", "no treatment")):
+        priority.append(
+            {
+                "problem": "Progressive cognitive decline",
+                "evidence": _first_matching_fact(facts, ["dementia", "worse", "improve", "treatment"]) or facts[-1],
+                "why_it_matters": "Progression changes urgency, follow-up planning, and support needs.",
+            }
+        )
+    if any(term in lowered for term in ("medication", "medical problems", "property", "affairs", "personal welfare")):
+        priority.append(
+            {
+                "problem": "Functional decision-making risk",
+                "evidence": _first_matching_fact(facts, ["medication", "medical problems", "property", "welfare"]) or facts[0],
+                "why_it_matters": "The board should separate medical, welfare, and property decisions and document what support is needed.",
+            }
+        )
+    if not priority:
+        priority = _generic_priority_problems(text)[:3]
+
+    snapshot.update(
+        {
+            "name_or_id": _clean_patient_name(snapshot.get("name_or_id", "")),
+            "presenting_problem": "Capacity assessment with cognitive and functional decision-making concerns.",
+            "likely_primary_issue": "Cognitive impairment affecting mental capacity and safe decision-making.",
+        }
+    )
+    return {
+        "patient_snapshot": snapshot,
+        "meeting_objective": (
+            "Review the evidence for impaired capacity, identify missing clinical context, and agree the immediate support, safety, and follow-up plan."
+        ),
+        "critical_facts": facts[:8],
+        "priority_problems": priority[:5],
+        "specialist_focus": [
+            "Primary team: confirm the reason for assessment and the specific decision that capacity applies to.",
+            "Geriatrics/neurology/psychiatry: clarify cognitive diagnosis, reversibility, and expected trajectory.",
+            "Social work/case management: identify support needs, safeguarding concerns, and next-of-kin or legal contacts.",
+        ],
+        "missing_data": [
+            "Formal cognitive score or mental status examination if available.",
+            "Current diagnoses, medications, and reversible causes considered.",
+            "The exact decision being assessed and whether capacity differs by decision domain.",
+            "Current living situation, caregiver support, and safety risks.",
+        ],
+        "red_flags": _capacity_red_flags(text),
+        "decision_points": [
+            "Does the evidence support impaired capacity for the specific decision under review?",
+            "What immediate safety or support actions are needed?",
+            "What clinical workup or collateral information is still required?",
+            "Who owns follow-up, documentation, and communication with family or legal representatives?",
+        ],
+        "meeting_flow": [
+            "Confirm the decision domain and purpose of the assessment.",
+            "Review the strongest evidence for memory, understanding, weighing, and communication.",
+            "Clarify missing medical and social context.",
+            "Agree support, safety plan, documentation, and follow-up owner.",
+        ],
+    }
+
+
+def _nonclinical_form_analysis(report_text: str) -> dict:
+    snapshot = _derive_snapshot(report_text)
+    snapshot.update(
+        {
+            "presenting_problem": "Uploaded document appears to be an administrative or legal form.",
+            "likely_primary_issue": "No reliable clinical problem was extracted from this document.",
+        }
+    )
+    return {
+        "patient_snapshot": snapshot,
+        "meeting_objective": (
+            "This upload appears to be a mental-capacity or administrative form, not a clinical "
+            "oncology report. Upload a clinical note, pathology report, imaging report, discharge "
+            "summary, or referral letter for board briefing extraction."
+        ),
+        "critical_facts": [
+            "The document is dominated by checkbox/form questions rather than clinical findings.",
+            "No reliable diagnosis, staging, treatment history, imaging findings, pathology, or MDT decision data was extracted.",
+        ],
+        "priority_problems": [],
+        "specialist_focus": [],
+        "missing_data": [
+            "Clinical diagnosis or reason for referral",
+            "Relevant history and examination findings",
+            "Imaging, pathology, laboratory, treatment, or medication details",
+            "Specific board decision or question",
+        ],
+        "red_flags": [],
+        "decision_points": [
+            "Upload a clinical source document before using this as a medical board briefing.",
+        ],
+        "meeting_flow": [
+            "Confirm the uploaded document type.",
+            "Replace with a clinical report if MDT review is needed.",
+            "Generate the briefing again from the clinical source document.",
+        ],
+    }
+
+
+def _generic_problem_from_report(text: str) -> str:
+    for headings in (
+        ["Assessment", "Impression", "Diagnosis", "Diagnoses"],
+        ["Chief Complaint", "Reason for Visit", "Indication", "Referral Reason"],
+        ["Findings", "Clinical History", "History of Present Illness", "HPI"],
+    ):
+        section = _section_after_heading(text, headings)
+        candidates = _split_report_candidates(section, 1)
+        if candidates:
+            return candidates[0]
+    candidates = _split_report_candidates(text, 1)
+    return candidates[0] if candidates else "Not specified in the report."
+
+
+def _generic_key_facts(text: str) -> list[str]:
+    sections = []
+    for headings in (
+        ["Assessment", "Impression", "Diagnosis", "Diagnoses"],
+        ["Findings", "Results", "Clinical History", "History of Present Illness", "HPI"],
+        ["Plan", "Recommendations"],
+        ["Labs", "Laboratory", "Imaging", "Pathology"],
+    ):
+        section = _section_after_heading(text, headings)
+        if section:
+            sections.append(section)
+    source = "\n".join(sections) if sections else text
+    return _split_report_candidates(source, 8)
+
+
+def _generic_priority_problems(text: str) -> list[dict]:
+    candidates = _generic_key_facts(text)[:6]
+    rows = []
+    for item in candidates:
+        rows.append(
+            {
+                "problem": item[:90],
+                "evidence": item,
+                "why_it_matters": "Should be reviewed by the team because it may affect diagnosis, risk, or next-step planning.",
+            }
+        )
+    return rows
+
+
+def _generic_red_flags(text: str) -> list[str]:
+    pattern = re.compile(
+        r"\b(urgent|emergent|critical|severe|worsening|metastatic|mass|lesion|bleeding|infection|sepsis|"
+        r"hypoxia|shortness of breath|chest pain|stroke|fracture|obstruction|positive margin|high grade|"
+        r"elevated|abnormal|progression)\b",
+        re.IGNORECASE,
+    )
+    return [item for item in _split_report_candidates(text, 10) if pattern.search(item)][:5]
 
 
 def _clean_text_list(items, limit: int = 8) -> list[str]:
@@ -660,6 +1036,11 @@ def _clean_text_list(items, limit: int = 8) -> list[str]:
 
 
 def _repair_report_analysis(analysis: dict, report_text: str) -> dict:
+    if _looks_like_capacity_assessment(report_text):
+        return _capacity_assessment_analysis(report_text)
+    if _looks_like_nonclinical_form(report_text):
+        return _nonclinical_form_analysis(report_text)
+
     snapshot = analysis.get("patient_snapshot") if isinstance(analysis.get("patient_snapshot"), dict) else {}
     derived_snapshot = _derive_snapshot(report_text)
     snapshot = dict(snapshot or {})
@@ -675,7 +1056,9 @@ def _repair_report_analysis(analysis: dict, report_text: str) -> dict:
 
     facts = _clean_text_list(analysis.get("critical_facts"), 8)
     if len(facts) < 5 or (facts and sum(len(item) for item in facts) / len(facts) < 32):
-        facts = _derive_key_facts(report_text)
+        derived_facts = _derive_key_facts(report_text)
+        if derived_facts:
+            facts = derived_facts
 
     problems_raw = analysis.get("priority_problems")
     problems: list[dict] = []
@@ -691,7 +1074,9 @@ def _repair_report_analysis(analysis: dict, report_text: str) -> dict:
             if len(problems) >= 6:
                 break
     if len(problems) < 3:
-        problems = _derive_priority_problems(report_text)
+        derived_problems = _derive_priority_problems(report_text)
+        if derived_problems:
+            problems = derived_problems
 
     red_flags = _clean_text_list(analysis.get("red_flags"), 5)
     if not red_flags:
@@ -1007,6 +1392,10 @@ def _analyze_report_grouped(report_text: str, model: str = MODEL) -> dict:
 def _analyze_report_pipeline(report_text: str, model: str = MODEL) -> tuple[dict, str]:
     """Fast path with quality fallbacks. Returns (analysis, mode_label)."""
     report_text = _clean_report_noise(report_text)
+    if _looks_like_capacity_assessment(report_text):
+        return _capacity_assessment_analysis(report_text), "capacity_assessment"
+    if _looks_like_nonclinical_form(report_text):
+        return _nonclinical_form_analysis(report_text), "nonclinical_form"
     start = time.perf_counter()
 
     for mode, runner in (
@@ -1045,6 +1434,10 @@ def analyze_report_with_mode(report_text: str, model: str = MODEL) -> tuple[dict
 def analyze_report_fast(report_text: str, model: str = MODEL) -> tuple[dict, str]:
     """Fast report briefing for local demos: deterministic extraction, no blocking LLM call."""
     cleaned = _clean_report_noise(report_text)
+    if _looks_like_capacity_assessment(cleaned):
+        return _capacity_assessment_analysis(cleaned), "capacity_assessment"
+    if _looks_like_nonclinical_form(cleaned):
+        return _nonclinical_form_analysis(cleaned), "nonclinical_form"
     base = _repair_report_analysis(_heuristic_report_analysis(cleaned), cleaned)
     return base, "fast_heuristic"
 

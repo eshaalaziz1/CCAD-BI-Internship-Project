@@ -15,10 +15,11 @@ from io import BytesIO
 
 import pandas as pd
 import streamlit as st
+import ollama
 from fpdf import FPDF
 from pypdf import PdfReader
 
-from src.constants import MODEL, PROMPT_VERSION
+from src.constants import CHAT_OPTIONS, KEEP_ALIVE, MODEL, PROMPT_VERSION
 from src.patient_insights import (
     render_profile_clinical_summary,
     render_profile_visual_insights,
@@ -742,6 +743,403 @@ def render_patient_context_strip(row: pd.Series) -> None:
     )
 
 
+def _render_board_workflow_cards(workflow: str) -> None:
+    prep_active = workflow == "Prep"
+    meeting_active = workflow == "During Meeting"
+    st.markdown(
+        f"""
+        <style>
+          .board-workflow-grid {{
+            display:grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 0.75rem;
+            margin: 0.65rem 0 1rem;
+          }}
+          .board-workflow-card {{
+            border: 1px solid rgba(37,94,126,0.16);
+            background: rgba(255,255,255,0.86);
+            border-radius: 12px;
+            padding: 0.9rem 1rem;
+            box-shadow: 0 8px 22px rgba(31,41,55,0.06);
+          }}
+          .board-workflow-card.active {{
+            border-color: rgba(37,94,126,0.5);
+            background: linear-gradient(135deg, rgba(37,94,126,0.13), rgba(31,138,131,0.08));
+            box-shadow: 0 12px 28px rgba(37,94,126,0.13);
+          }}
+          .board-workflow-card span {{
+            display:inline-flex;
+            border-radius:999px;
+            background:#e8f1f8;
+            color:#255e7e;
+            padding:0.18rem 0.55rem;
+            font-size:0.72rem;
+            font-weight:800;
+            margin-bottom:0.45rem;
+          }}
+          .board-workflow-card h4 {{
+            margin:0 0 0.25rem;
+            color:#172033;
+          }}
+          .board-workflow-card p {{
+            margin:0;
+            color:#64748b;
+            font-size:0.9rem;
+            line-height:1.45;
+          }}
+        </style>
+        <div class="board-workflow-grid">
+          <article class="board-workflow-card {'active' if prep_active else ''}">
+            <span>{'Active' if prep_active else 'Before meeting'}</span>
+            <h4>Prep</h4>
+            <p>Add patients, review chart summaries, fill gaps, and prepare discussion questions.</p>
+          </article>
+          <article class="board-workflow-card {'active' if meeting_active else ''}">
+            <span>{'Active' if meeting_active else 'Live review'}</span>
+            <h4>During Meeting</h4>
+            <p>Review each case, discuss prepared questions, ask chat, and record decisions.</p>
+          </article>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_board_section(title: str, description: str = "", *, step: str | None = None) -> None:
+    prefix = f"{step}. " if step else ""
+    st.markdown(f"### {prefix}{title}")
+    if description:
+        st.caption(description)
+
+
+def _meeting_patient_context(row: pd.Series, patient_id: str) -> str:
+    link = load_patient_report_link(patient_id)
+    extra = f"\n\nLinked PDF report excerpt:\n{link.report_text[:5000]}" if link else ""
+    return format_patient_data(row) + extra
+
+
+def _normalize_chat_text(prompt: str) -> str:
+    return re.sub(r"[^a-z0-9\s]", "", str(prompt or "").lower()).strip()
+
+
+def _board_chat_intent(prompt: str) -> str:
+    normalized = _normalize_chat_text(prompt)
+    if not normalized:
+        return "empty"
+    greeting_starts = ("hi", "hello", "hey", "yo", "good morning", "good afternoon", "good evening")
+    if normalized in greeting_starts or normalized.startswith(greeting_starts):
+        return "greeting"
+    if any(phrase in normalized for phrase in ("not what i asked", "thats not what i asked", "that's not what i asked", "wrong answer", "you didnt answer", "you did not answer")):
+        return "correction"
+    if any(phrase in normalized for phrase in ("what can you do", "what do you do", "how can you help", "help me", "capabilities", "what are you")):
+        return "capability"
+    if any(word in normalized for word in ("fact", "chart", "what do we know", "findings", "result", "lab", "imaging", "pathology", "diagnosis")):
+        return "chart_facts"
+    if any(word in normalized for word in ("summarize", "summary", "brief", "overview")):
+        return "summary"
+    if any(word in normalized for word in ("missing", "gap", "needed", "workup", "confirm")):
+        return "missing"
+    if any(word in normalized for word in ("discuss", "question", "talk about", "focus", "agenda")):
+        return "discussion"
+    if any(word in normalized for word in ("treatment", "therapy", "option", "plan", "recommend", "decision", "next step")):
+        return "clinical_question"
+    return "general"
+
+
+def _friendly_chat_fallback(prompt: str, *, has_context: bool = True) -> str:
+    intent = _board_chat_intent(prompt)
+    if intent == "greeting":
+        if has_context:
+            return "Hi, I'm doing well. I can help review the selected patient, summarize chart details, identify missing information, or support the board discussion. What would you like to look at?"
+        return "Hi, I'm doing well. Select a patient and I can help review chart details, missing information, and meeting notes."
+    if intent == "correction":
+        return "You're right. I answered the wrong thing. I'm here and ready to help. Ask me anything about the selected patient or the meeting."
+    if not has_context:
+        return "I can help with board workflow questions now. Select a patient to ask about chart facts, missing information, or decisions."
+    return "I can help summarize the patient chart, pull out key facts, identify missing information, draft discussion questions, explain terms, and support meeting notes."
+
+
+def _clean_board_assistant_reply(value: str) -> tuple[str, str | None]:
+    text = str(value or "").strip()
+    if not text or text.lower() in {"nan", "none", "..."}:
+        return "", "empty_model_response"
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<unused\d+>\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"</?[^>\s]+>", "", text)
+    answer_match = re.search(
+        r"(?:^|\n)\s*(?:final answer|answer|response)\s*[:\-]\s*(.+)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if answer_match:
+        text = answer_match.group(1)
+    text = re.sub(r"^\s*(?:thought|analysis|reasoning|thinking process)\s*[:\-]*\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"^\s*(?:\d+[.)]\s*)?(?:identify the user|identify the core|identify key information|scan the context|the user wants|the user is asking|i need to|we need to|recognize the intent|determine the appropriate|maintain persona|consider the persona|formulate).*?(?=\n\s*(?:[-*]\s+|\d+[.)]\s+|patient id|diagnosis|stage|summary|key facts|missing|recommendation)|$)",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
+    lowered = text.lower()
+    reasoning_markers = (
+        "identify the core",
+        "identify the user",
+        "scan the context",
+        "the user wants",
+        "the user is asking",
+        "thinking process",
+        "recognize the intent",
+        "maintain persona",
+        "formulate a",
+        "determine the appropriate",
+    )
+    if not text:
+        return "", "internal_reasoning_only"
+    if any(marker in lowered for marker in reasoning_markers):
+        return "", "internal_reasoning_leak"
+    return "\n".join(line.rstrip() for line in text.splitlines()).strip(), None
+
+
+def _board_chart_fact_answer(prompt: str, row: pd.Series | None, patient_id: str | None) -> str:
+    if row is None or not patient_id:
+        return _friendly_chat_fallback(prompt, has_context=False)
+    ctx = _chart_summary_context(row, patient_id, load_patient_report_link(patient_id))
+    facts = []
+    facts.append(f"Diagnosis: {ctx.get('diagnosis', 'not documented')}")
+    facts.append(f"Stage/status: {ctx.get('stage', 'not documented')}")
+    facts.append(f"Presenting problem: {_short_board_text(ctx.get('presenting'), limit=180)}")
+    if ctx.get("critical"):
+        facts.append("Key findings: " + "; ".join(ctx["critical"][:3]))
+    if ctx.get("results"):
+        facts.append("Results: " + "; ".join(ctx["results"][:3]))
+    if ctx.get("updates"):
+        facts.append("Care context: " + "; ".join(ctx["updates"][:3]))
+    return "\n".join(f"- {item}" for item in facts if item)
+
+
+def _board_assistant_failure_answer(prompt: str, row: pd.Series | None, patient_id: str | None, *, backend_failed: bool = False) -> str:
+    intent = _board_chat_intent(prompt)
+    if intent in {"chart_facts", "summary", "missing", "discussion", "clinical_question"} and row is not None and patient_id:
+        if intent == "missing":
+            ctx = _chart_summary_context(row, patient_id, load_patient_report_link(patient_id))
+            items = ctx.get("missing") or []
+            return "Missing or unclear information:\n" + ("\n".join(f"- {item}" for item in items) if items else "- No major gaps detected from available chart fields.")
+        if intent == "discussion":
+            prepared = _question_lines(st.session_state.get("board_questions", {}).get(patient_id, "")) if "board_questions" in st.session_state else []
+            if prepared:
+                return "Prepared discussion questions:\n" + "\n".join(f"- {item}" for item in prepared)
+        return _board_chart_fact_answer(prompt, row, patient_id)
+    if backend_failed:
+        return "The assistant had trouble responding. Please try again, or ask about the selected patient's summary, missing information, or discussion questions."
+    return _friendly_chat_fallback(prompt, has_context=bool(row is not None and patient_id))
+
+
+def _board_local_assistant_answer(prompt: str, row: pd.Series | None, patient_id: str | None) -> str | None:
+    intent = _board_chat_intent(prompt)
+    if intent in {"greeting", "correction", "capability"}:
+        if intent == "capability":
+            return "I can help summarize the patient chart, pull out key facts, identify missing information, draft discussion questions, explain terms, and support meeting notes."
+        return _friendly_chat_fallback(prompt, has_context=bool(row is not None and patient_id))
+    if row is None or not patient_id:
+        return _friendly_chat_fallback(prompt, has_context=False)
+    ctx = _chart_summary_context(row, patient_id, load_patient_report_link(patient_id))
+    if intent == "chart_facts":
+        return _board_chart_fact_answer(prompt, row, patient_id)
+    if intent == "summary":
+        return (
+            f"{ctx.get('diagnosis', 'This patient')} is the current board case. "
+            f"Presenting issue: {_short_board_text(ctx.get('presenting'), limit=220)} "
+            f"Main decision objective: {_short_board_text(ctx.get('objective'), limit=180)}"
+        )
+    if intent == "missing":
+        items = ctx.get("missing") or []
+        if not items:
+            return "No major missing information was detected from the available chart fields. Confirm this against the source chart before final decisions."
+        return "Missing or unclear information:\n" + "\n".join(f"- {item}" for item in items)
+    if intent == "discussion":
+        prepared = _question_lines(st.session_state.get("board_questions", {}).get(patient_id, "")) if "board_questions" in st.session_state else []
+        if prepared:
+            return "Prepared discussion questions:\n" + "\n".join(f"- {item}" for item in prepared)
+        return (
+            "Suggested discussion focus:\n"
+            f"- Confirm the main decision for {ctx.get('diagnosis', 'this patient')}\n"
+            "- Review missing information before treatment decisions\n"
+            "- Assign next actions and owners before moving to the next case"
+        )
+    return None
+
+
+def _render_prep_ai_enrichment(patient_id: str, row: pd.Series, ollama_ok: bool) -> None:
+    st.markdown("##### AI chart enrichment")
+    st.caption("Draft missing-data prompts or discussion-question ideas. Review before appending.")
+    missing_fields = [
+        label
+        for field, label in (
+            ("biomarkers", "biomarkers"),
+            ("imaging", "imaging"),
+            ("pathology", "pathology"),
+            ("pending_tests", "pending tests"),
+            ("prior_treatment", "prior treatment"),
+        )
+        if not str(row.get(field, "")).strip()
+    ]
+    if missing_fields:
+        st.warning("Missing chart fields: " + ", ".join(missing_fields))
+    else:
+        st.success("Core chart fields look populated.")
+
+    key = f"board_ai_enrichment_{patient_id}"
+    if st.button(
+        "Draft prep questions with AI",
+        key=f"board_ai_enrich_btn_{patient_id}",
+        disabled=not ollama_ok,
+        use_container_width=True,
+    ):
+        prompt = (
+            "You are helping staff prepare a case for a multidisciplinary oncology board.\n"
+            "Use only the patient/chart context. Return concise missing-data items and discussion questions.\n"
+            "Do not include hidden reasoning.\n\n"
+            f"Patient context:\n{_meeting_patient_context(row, patient_id)[:9000]}"
+        )
+        try:
+            with st.spinner("Drafting prep questions"):
+                response = ollama.chat(
+                    model=MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    options=CHAT_OPTIONS,
+                    keep_alive=KEEP_ALIVE,
+                    stream=False,
+                )
+            st.session_state[key] = ((response.get("message", {}) or {}).get("content", "") or "").strip()
+        except Exception as exc:
+            logging.warning("prep_ai_enrichment_failed patient_id=%s error=%s", patient_id, exc)
+            st.session_state[key] = "AI prep is unavailable right now. You can still add discussion questions manually."
+
+    if not ollama_ok:
+        st.info("Start Ollama to use AI enrichment.")
+    draft = st.session_state.get(key, "")
+    if draft:
+        st.text_area("AI draft for prep", value=draft, height=160, key=f"board_ai_enrichment_text_{patient_id}")
+        if st.button("Append AI draft to discussion questions", key=f"board_ai_apply_{patient_id}", use_container_width=True):
+            current = st.session_state["board_questions"].get(patient_id, "").strip()
+            combined = f"{current}\n\n{draft}".strip() if current else draft
+            update_case_notes(patient_id, discussion_question=combined)
+            st.rerun()
+
+
+def _render_meeting_chat(patient_id: str, row: pd.Series, ollama_ok: bool) -> None:
+    st.markdown(
+        """
+        <section class="assistant-panel">
+          <h4>AI meeting assistant</h4>
+          <p>Ask about this patient, missing workup, treatment context, or the discussion so far.</p>
+          <div class="assistant-suggestions">
+            <span>Identify missing workup</span>
+            <span>Summarize discussion</span>
+            <span>Clarify chart facts</span>
+          </div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    history_key = f"board_meeting_chat_{patient_id}"
+    pending_key = f"board_meeting_chat_pending_{patient_id}"
+    debug_key = f"board_meeting_chat_debug_{patient_id}"
+    history: list[dict[str, str]] = st.session_state.setdefault(history_key, [])
+    pending = bool(st.session_state.get(pending_key, False))
+
+    if not history:
+        st.info("Ask a patient-specific question, or type 'hello' to start.")
+    for msg in history[-8:]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    prompt = st.chat_input(
+        "Ask about this patient...",
+        key=f"board_meeting_chat_input_{patient_id}",
+        disabled=pending,
+    )
+
+    if prompt and prompt.strip():
+        prompt = prompt.strip()
+        history.append({"role": "user", "content": prompt})
+        st.session_state[history_key] = history[-12:]
+        st.session_state[pending_key] = True
+
+        local_answer = _board_local_assistant_answer(prompt, row, patient_id)
+        answer = local_answer or ""
+        debug_detail = {"source": "local", "reason": "intent_match" if local_answer else "model_attempt"}
+
+        if not answer:
+            if not ollama_ok:
+                answer = _board_assistant_failure_answer(prompt, row, patient_id, backend_failed=True)
+                debug_detail = {"source": "fallback", "reason": "ollama_unreachable"}
+            else:
+                context = _meeting_patient_context(row, patient_id)
+                chart_context = _chart_summary_context(row, patient_id, load_patient_report_link(patient_id))
+                chart_brief = (
+                    f"Diagnosis: {chart_context.get('diagnosis', '')}\n"
+                    f"Presenting problem: {chart_context.get('presenting', '')}\n"
+                    f"Primary issue: {chart_context.get('primary_issue', '')}\n"
+                    f"Key findings: {'; '.join(chart_context.get('critical', []) + chart_context.get('results', []))}\n"
+                    f"Recent updates: {'; '.join(chart_context.get('updates', []))}\n"
+                    f"Missing information: {'; '.join(chart_context.get('missing', []))}"
+                )
+                board_question = st.session_state["board_questions"].get(patient_id, "")
+                board_notes = (
+                    f"Prepared discussion questions: {board_question}\n"
+                    f"Current decision draft: {st.session_state['board_recommendations'].get(patient_id, '')}\n"
+                    f"Current rationale draft: {st.session_state['board_rationale'].get(patient_id, '')}"
+                )
+                assistant_prompt = (
+                    "You are OncoBoard's MDT clinical copilot. Behave like a conversational assistant. "
+                    "Answer greetings and capability questions naturally. For clinical questions, use the selected patient context. "
+                    "If a fact is missing, say it is not documented in the chart. Do not output chain-of-thought, analysis, planning steps, "
+                    "backend details, or raw error text. Return only the final user-facing answer with short paragraphs or bullets.\n\n"
+                    f"Structured chart summary:\n{chart_brief[:5000]}\n\n"
+                    f"Full patient context:\n{context[:9000]}\n\nBoard context:\n{board_notes[:2500]}\n\nQuestion: {prompt}"
+                )
+                try:
+                    with st.spinner("Assistant is reviewing the case..."):
+                        response = ollama.chat(
+                            model=MODEL,
+                            messages=[{"role": "user", "content": assistant_prompt}],
+                            options={**CHAT_OPTIONS, "num_predict": 900},
+                            keep_alive=KEEP_ALIVE,
+                            stream=False,
+                        )
+                    raw_answer = ((response.get("message", {}) or {}).get("content", "") or "").strip()
+                    cleaned, clean_reason = _clean_board_assistant_reply(raw_answer)
+                    if cleaned:
+                        answer = cleaned
+                        debug_detail = {"source": "medgemma", "reason": "ok", "raw_chars": len(raw_answer)}
+                    else:
+                        answer = _board_assistant_failure_answer(prompt, row, patient_id, backend_failed=False)
+                        debug_detail = {"source": "fallback", "reason": clean_reason or "empty_after_cleaning", "raw_chars": len(raw_answer)}
+                        logging.warning("meeting_chat_model_unusable patient_id=%s detail=%s raw_preview=%r", patient_id, debug_detail, raw_answer[:240])
+                except TimeoutError as exc:
+                    answer = _board_assistant_failure_answer(prompt, row, patient_id, backend_failed=True)
+                    debug_detail = {"source": "fallback", "reason": "timeout", "error": str(exc)}
+                    logging.warning("meeting_chat_timeout patient_id=%s error=%s", patient_id, exc)
+                except Exception as exc:
+                    answer = _board_assistant_failure_answer(prompt, row, patient_id, backend_failed=True)
+                    debug_detail = {"source": "fallback", "reason": "api_error", "error_type": type(exc).__name__}
+                    logging.warning("meeting_chat_api_error patient_id=%s error=%s", patient_id, exc)
+
+        history = st.session_state.setdefault(history_key, [])
+        history.append({"role": "assistant", "content": answer})
+        st.session_state[history_key] = history[-12:]
+        st.session_state[debug_key] = debug_detail
+        st.session_state[pending_key] = False
+        st.rerun()
+
+    if history and st.button("Clear assistant history", key=f"board_meeting_chat_clear_{patient_id}"):
+        st.session_state[history_key] = []
+        st.session_state[pending_key] = False
+        st.rerun()
+
+
 def render_linked_report_summary(link, *, compact: bool = False) -> None:
     """Linked PDF briefing — compact on the board, fuller in the patient chart."""
     analysis = repair_report_analysis(link.analysis, link.report_text)
@@ -859,6 +1257,846 @@ def _render_action_items_editor(patient_id: str) -> list[dict]:
     return updated
 
 
+
+_BOARD_WORKSPACE_CSS = """
+<style>
+  .board-page-intro {
+    border: 1px solid rgba(37,94,126,0.16);
+    border-radius: 18px;
+    background: linear-gradient(135deg, rgba(255,255,255,0.96), rgba(232,242,248,0.62));
+    box-shadow: 0 16px 40px rgba(31,41,55,0.07);
+    padding: 1rem 1.15rem;
+    margin: 0.75rem 0 1rem;
+  }
+  .board-page-intro h3 { margin:0.15rem 0 0.25rem; color:#172033; font-size:1.35rem; }
+  .board-page-intro p { margin:0; color:#64748b; line-height:1.45; }
+  .board-meta-strip {
+    display:flex;
+    flex-wrap:wrap;
+    gap:0.5rem;
+    margin:0.75rem 0 0;
+  }
+  .board-meta-strip span {
+    display:inline-flex;
+    border-radius:999px;
+    background:#e8f1f8;
+    color:#284760;
+    border:1px solid rgba(37,94,126,0.15);
+    padding:0.28rem 0.65rem;
+    font-size:0.8rem;
+    font-weight:760;
+  }
+  .board-kicker {
+    display:inline-flex;
+    align-items:center;
+    border-radius:999px;
+    padding:0.18rem 0.62rem;
+    margin-bottom:0.35rem;
+    background:#e7f1f8;
+    color:#255e7e;
+    font-size:0.72rem;
+    font-weight:800;
+    letter-spacing:0.05em;
+    text-transform:uppercase;
+  }
+  .workflow-segment {
+    border:1px solid rgba(37,94,126,0.2);
+    border-radius:18px;
+    background:rgba(255,255,255,0.82);
+    padding:1rem 1.05rem;
+    min-height:7.1rem;
+    box-shadow:0 14px 32px rgba(31,41,55,0.06);
+    margin-bottom:0.45rem;
+  }
+  .workflow-segment.active {
+    border-color:rgba(37,94,126,0.68);
+    background:linear-gradient(135deg, rgba(37,94,126,0.16), rgba(31,138,131,0.1));
+    box-shadow:0 18px 40px rgba(37,94,126,0.16);
+  }
+  .workflow-segment h4 { margin:0 0 0.35rem; color:#172033; font-size:1.08rem; }
+  .workflow-segment p { margin:0; color:#526579; line-height:1.45; }
+  .workflow-segment.active p { color:#2e4d64; }
+  .workflow-active-pill {
+    display:inline-flex;
+    border-radius:999px;
+    padding:0.16rem 0.55rem;
+    margin-bottom:0.48rem;
+    background:#ffffff;
+    color:#255e7e;
+    border:1px solid rgba(37,94,126,0.18);
+    font-size:0.7rem;
+    font-weight:850;
+    text-transform:uppercase;
+    letter-spacing:0.06em;
+  }
+  .patient-header {
+    border:1px solid rgba(37,94,126,0.2);
+    border-left:7px solid #4f8f95;
+    border-radius:22px;
+    background:linear-gradient(135deg, rgba(255,255,255,0.98), rgba(232,242,248,0.78));
+    box-shadow:0 20px 46px rgba(31,41,55,0.09);
+    padding:1.2rem 1.25rem;
+    margin:1rem 0 1.05rem;
+  }
+  .patient-header-grid {
+    display:grid;
+    grid-template-columns:minmax(0, 1fr) auto;
+    gap:1rem;
+    align-items:start;
+  }
+  .patient-header h2 {
+    margin:0.1rem 0 0.35rem;
+    color:#172033;
+    font-size:1.92rem;
+    line-height:1.12;
+  }
+  .patient-header .diagnosis {
+    margin:0;
+    color:#31475d;
+    font-size:1.02rem;
+    line-height:1.45;
+  }
+  .patient-header-meta {
+    display:flex;
+    flex-wrap:wrap;
+    gap:0.45rem;
+    margin-top:0.8rem;
+  }
+  .patient-header-chip {
+    display:inline-flex;
+    border-radius:999px;
+    background:#e8f1f8;
+    color:#284760;
+    border:1px solid rgba(37,94,126,0.15);
+    padding:0.31rem 0.68rem;
+    font-size:0.82rem;
+    font-weight:750;
+  }
+  .patient-position {
+    display:grid;
+    grid-template-columns:repeat(2, minmax(5.5rem, auto));
+    gap:0.5rem;
+  }
+  .patient-position div {
+    border:1px solid rgba(37,94,126,0.16);
+    border-radius:13px;
+    background:rgba(255,255,255,0.78);
+    padding:0.58rem 0.7rem;
+    text-align:center;
+    color:#64748b;
+    font-size:0.72rem;
+    font-weight:800;
+    letter-spacing:0.05em;
+    text-transform:uppercase;
+  }
+  .patient-position strong {
+    display:block;
+    color:#255e7e;
+    font-size:1.24rem;
+    letter-spacing:0;
+    text-transform:none;
+  }
+  .board-section {
+    margin:1.2rem 0 0.75rem;
+  }
+  .board-section h3 {
+    margin:0;
+    color:#172033;
+    font-size:1.35rem;
+    line-height:1.2;
+  }
+  .board-section p {
+    margin:0.3rem 0 0;
+    color:#64748b;
+    line-height:1.45;
+  }
+  .chart-summary-workspace {
+    border:1px solid rgba(37,94,126,0.2);
+    border-radius:22px;
+    background:rgba(255,255,255,0.9);
+    box-shadow:0 20px 48px rgba(31,41,55,0.08);
+    padding:1.2rem 1.25rem;
+    margin:0 0 1.1rem;
+  }
+  .chart-summary-workspace h3 {
+    margin:0 0 0.35rem;
+    color:#172033;
+    font-size:1.45rem;
+  }
+  .clinical-summary-text {
+    color:#334155;
+    font-size:1rem;
+    line-height:1.58;
+    margin:0.45rem 0 1rem;
+    max-width:74rem;
+  }
+  .summary-section-grid {
+    display:grid;
+    grid-template-columns:repeat(2, minmax(0, 1fr));
+    gap:1rem;
+    margin-top:0.9rem;
+  }
+  .summary-section {
+    border-top:1px solid rgba(148,163,184,0.28);
+    padding-top:0.85rem;
+  }
+  .summary-section h4 {
+    margin:0 0 0.45rem;
+    color:#365c78;
+    font-size:0.76rem;
+    letter-spacing:0.08em;
+    text-transform:uppercase;
+  }
+  .summary-section ul { margin:0; padding-left:1.05rem; }
+  .summary-section li, .summary-section p {
+    color:#334155;
+    font-size:0.94rem;
+    line-height:1.52;
+    margin-bottom:0.35rem;
+  }
+  .workflow-block {
+    border:1px solid rgba(37,94,126,0.16);
+    border-radius:18px;
+    background:rgba(255,255,255,0.86);
+    box-shadow:0 14px 34px rgba(31,41,55,0.06);
+    padding:1rem 1.05rem;
+    margin:0 0 1rem;
+  }
+  .workflow-block h4 { margin:0 0 0.35rem; color:#172033; font-size:1.1rem; }
+  .workflow-block p { color:#64748b; line-height:1.45; margin:0 0 0.65rem; }
+  .board-question-card {
+    border:1px solid rgba(37,94,126,0.18);
+    border-radius:14px;
+    background:#ffffff;
+    padding:0.85rem 0.95rem;
+    margin:0.55rem 0;
+    color:#243244;
+    line-height:1.5;
+    overflow-wrap:anywhere;
+    word-break:normal;
+  }
+  .question-row-spacer { margin-bottom:0.75rem; }
+  div[data-testid="stButton"] > button, div[data-testid="stFormSubmitButton"] > button {
+    white-space:nowrap;
+    min-height:2.65rem;
+  }
+  .question-builder-form {
+    border:1px solid rgba(37,94,126,0.16);
+    border-radius:16px;
+    background:rgba(255,255,255,0.72);
+    padding:0.85rem;
+    margin-top:0.85rem;
+  }
+  .board-empty-note {
+    border:1px dashed rgba(37,94,126,0.28);
+    border-radius:14px;
+    background:rgba(232,242,248,0.45);
+    padding:0.9rem 1rem;
+    color:#526579;
+    line-height:1.5;
+  }
+  .meeting-support-grid {
+    display:grid;
+    grid-template-columns:minmax(0, 1fr) minmax(20rem, 0.62fr);
+    gap:1rem;
+    align-items:start;
+  }
+  .queue-management-grid {
+    display:grid;
+    grid-template-columns:minmax(0, 0.7fr) minmax(0, 1.3fr);
+    gap:1rem;
+    align-items:start;
+  }
+  .board-split-workspace {
+    display:grid;
+    grid-template-columns:minmax(16rem, 0.28fr) minmax(0, 0.72fr);
+    gap:1.15rem;
+    align-items:start;
+    margin-top:0.55rem;
+  }
+  .board-side-panel {
+    border:1px solid rgba(37,94,126,0.17);
+    border-radius:18px;
+    background:rgba(255,255,255,0.82);
+    box-shadow:0 14px 34px rgba(31,41,55,0.06);
+    padding:0.85rem;
+  }
+  .board-side-panel h4 {
+    margin:0 0 0.25rem;
+    color:#172033;
+    font-size:1rem;
+  }
+  .board-side-panel p {
+    margin:0 0 0.75rem;
+    color:#64748b;
+    font-size:0.9rem;
+    line-height:1.42;
+  }
+  .board-main-panel {
+    min-width:0;
+  }
+  .prep-work-grid {
+    display:grid;
+    grid-template-columns:minmax(0, 0.46fr) minmax(0, 0.54fr);
+    gap:1rem;
+    align-items:start;
+  }
+  .assistant-panel {
+    border:1px solid rgba(37,94,126,0.18);
+    border-radius:18px;
+    background:linear-gradient(135deg, rgba(255,255,255,0.94), rgba(232,242,248,0.54));
+    box-shadow:0 16px 36px rgba(31,41,55,0.07);
+    padding:1rem 1.05rem;
+  }
+  .assistant-panel h4 {
+    margin:0 0 0.35rem;
+    color:#172033;
+    font-size:1.08rem;
+  }
+  .assistant-panel p {
+    margin:0 0 0.7rem;
+    color:#64748b;
+    line-height:1.45;
+  }
+  .assistant-suggestions {
+    display:flex;
+    flex-wrap:wrap;
+    gap:0.45rem;
+    margin:0.45rem 0 0.8rem;
+  }
+  .assistant-suggestions span {
+    display:inline-flex;
+    border-radius:999px;
+    background:#e8f1f8;
+    color:#284760;
+    border:1px solid rgba(37,94,126,0.14);
+    padding:0.28rem 0.62rem;
+    font-size:0.78rem;
+    font-weight:720;
+  }
+  @media (max-width: 1050px) {
+    .patient-header-grid, .summary-section-grid, .meeting-support-grid, .queue-management-grid, .board-split-workspace, .prep-work-grid { grid-template-columns:1fr; }
+    .patient-position { grid-template-columns:repeat(2, minmax(0, 1fr)); }
+  }
+</style>
+"""
+
+
+def _render_board_workspace_styles() -> None:
+    st.markdown(_BOARD_WORKSPACE_CSS, unsafe_allow_html=True)
+
+
+def _clean_board_value(value, default: str = "") -> str:
+    if value is None:
+        return default
+    try:
+        if pd.isna(value):
+            return default
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "null", "not found", "not specified", "unknown", "n/a"}:
+        return default
+    return text
+
+
+def _short_board_text(value, limit: int = 320, default: str = "Not documented in chart.") -> str:
+    text = _clean_board_value(value, default="")
+    if not text:
+        return default
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[: limit - 1].rstrip() + "..." if len(text) > limit else text
+
+
+def _board_list_items(value, limit: int = 4) -> list[str]:
+    items = _as_list(value)
+    cleaned: list[str] = []
+    for item in items:
+        if isinstance(item, dict):
+            parts = [
+                _clean_board_value(item.get("problem"), default=""),
+                _clean_board_value(item.get("evidence"), default=""),
+                _clean_board_value(item.get("why_it_matters"), default=""),
+            ]
+            item = ": ".join([part for part in parts if part]) or item.get("question") or item.get("text") or item.get("title") or ""
+        text = _short_board_text(item, limit=190, default="")
+        if text and text not in cleaned:
+            cleaned.append(text)
+        if len(cleaned) >= limit:
+            break
+    return cleaned
+
+
+def _render_html_list(items: list[str], empty: str = "Not documented in chart.") -> str:
+    if not items:
+        return f"<p>{html.escape(empty)}</p>"
+    lis = "".join(f"<li>{html.escape(item)}</li>" for item in items)
+    return f"<ul>{lis}</ul>"
+
+
+def _report_snapshot_value(analysis: dict | None, key: str) -> str:
+    if not isinstance(analysis, dict):
+        return ""
+    snapshot = analysis.get("patient_snapshot") or {}
+    if not isinstance(snapshot, dict):
+        return ""
+    return _clean_board_value(snapshot.get(key), default="")
+
+
+def _chart_summary_context(row: pd.Series, patient_id: str, report_link) -> dict:
+    analysis = repair_report_analysis(report_link.analysis, report_link.report_text) if report_link else None
+    diagnosis = _clean_board_value(row.get("diagnosis"), default="Diagnosis pending")
+    stage = _clean_board_value(row.get("stage"), default="Pending staging")
+    age = _clean_board_value(row.get("age"), default="Age unknown")
+    sex = _clean_board_value(row.get("sex"), default="Sex unknown")
+    ecog = _clean_board_value(row.get("ecog"), default="ECOG not set")
+    presenting = _report_snapshot_value(analysis, "presenting_problem") or _short_board_text(row.get("notes"), limit=260, default="No presenting problem documented.")
+    primary_issue = _report_snapshot_value(analysis, "likely_primary_issue") or diagnosis
+    objective = _clean_board_value(analysis.get("meeting_objective") if isinstance(analysis, dict) else "", default="Clarify the treatment decision, missing data, and next actions for this case.")
+    critical = _board_list_items(analysis.get("critical_facts") if isinstance(analysis, dict) else [], limit=5)
+    red_flags = _board_list_items(analysis.get("red_flags") if isinstance(analysis, dict) else [], limit=3)
+    missing = _board_list_items(analysis.get("missing_data") if isinstance(analysis, dict) else [], limit=5)
+    if not missing:
+        for field, label in (
+            ("biomarkers", "Biomarkers or molecular results"),
+            ("imaging", "Recent imaging findings"),
+            ("pathology", "Pathology confirmation"),
+            ("pending_tests", "Pending tests or workup"),
+            ("prior_treatment", "Prior treatment history"),
+        ):
+            if not _clean_board_value(row.get(field), default=""):
+                missing.append(label)
+    results = []
+    for label, field in (("Imaging", "imaging"), ("Pathology", "pathology"), ("Biomarkers", "biomarkers")):
+        value = _clean_board_value(row.get(field), default="")
+        if value:
+            results.append(f"{label}: {_short_board_text(value, limit=210, default='')}")
+    updates = []
+    for label, field in (("Prior treatment", "prior_treatment"), ("Pending workup", "pending_tests"), ("Medications", "medications"), ("Comorbidities", "comorbidities")):
+        value = _clean_board_value(row.get(field), default="")
+        if value:
+            updates.append(f"{label}: {_short_board_text(value, limit=210, default='')}")
+    return {
+        "analysis": analysis,
+        "diagnosis": diagnosis,
+        "stage": stage,
+        "age": age,
+        "sex": sex,
+        "ecog": ecog,
+        "presenting": presenting,
+        "primary_issue": primary_issue,
+        "objective": objective,
+        "critical": critical,
+        "red_flags": red_flags,
+        "missing": missing[:5],
+        "results": results,
+        "updates": updates,
+    }
+
+
+def _render_workflow_switcher() -> str:
+    mode = st.session_state.setdefault("board_workflow_mode", "Prep")
+    prep_active = mode == "Prep"
+    meeting_active = mode == "During Meeting"
+    prep_col, meeting_col = st.columns(2, gap="medium")
+    with prep_col:
+        st.markdown(
+            f"""
+            <section class="workflow-segment {'active' if prep_active else ''}">
+              <span class="workflow-active-pill">{'Active' if prep_active else 'Before meeting'}</span>
+              <h4>Prep</h4>
+              <p>Prepare patients, chart summaries, missing data, and discussion points before the board starts.</p>
+            </section>
+            """,
+            unsafe_allow_html=True,
+        )
+        if st.button("Open Prep", type="primary" if prep_active else "secondary", use_container_width=True, key="workflow_open_prep"):
+            st.session_state["board_workflow_mode"] = "Prep"
+            st.rerun()
+    with meeting_col:
+        st.markdown(
+            f"""
+            <section class="workflow-segment {'active' if meeting_active else ''}">
+              <span class="workflow-active-pill">{'Active' if meeting_active else 'Live workflow'}</span>
+              <h4>During Meeting</h4>
+              <p>Review the active case, discuss prepared questions, capture decisions, and use the clinical copilot.</p>
+            </section>
+            """,
+            unsafe_allow_html=True,
+        )
+        if st.button("Open During Meeting", type="primary" if meeting_active else "secondary", use_container_width=True, key="workflow_open_meeting"):
+            st.session_state["board_workflow_mode"] = "During Meeting"
+            st.rerun()
+    return st.session_state.get("board_workflow_mode", "Prep")
+
+
+def _render_patient_header(row: pd.Series, patient_id: str, idx: int, queue_len: int, *, mode: str) -> None:
+    ctx = _chart_summary_context(row, patient_id, load_patient_report_link(patient_id))
+    label = patient_profile_label(row)
+    mrn = _clean_board_value(row.get("mrn"), default=_clean_board_value(row.get("MRN"), default="Not available"))
+    status = normalize_board_status(st.session_state["board_status"].get(patient_id, "Ready for board"))
+    board_date = display_meeting_date(get_meeting_date())
+    chips = [
+        f"MRN: {mrn}",
+        f"{ctx['age']} yrs" if str(ctx["age"]).isdigit() else str(ctx["age"]),
+        str(ctx["sex"]),
+        f"Stage {ctx['stage']}",
+        str(ctx["ecog"]),
+        status,
+        f"Board {board_date}",
+    ]
+    chip_html = "".join(f"<span class='patient-header-chip'>{html.escape(chip)}</span>" for chip in chips if _clean_board_value(chip))
+    st.markdown(
+        f"""
+        <section class="patient-header">
+          <div class="patient-header-grid">
+            <div>
+              <span class="board-kicker">{'Prep case' if mode == 'prep' else 'Current patient'}</span>
+              <h2>{html.escape(label)}</h2>
+              <p class="diagnosis">{html.escape(ctx['diagnosis'])}</p>
+              <div class="patient-header-meta">{chip_html}</div>
+            </div>
+            <div class="patient-position">
+              <div><strong>{idx + 1}/{queue_len}</strong>Position</div>
+              <div><strong>{html.escape(status)}</strong>Status</div>
+            </div>
+          </div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_chart_summary_panel(row: pd.Series, patient_id: str, report_link) -> None:
+    ctx = _chart_summary_context(row, patient_id, report_link)
+    st.markdown(
+        f"""
+        <section class="chart-summary-workspace">
+          <span class="board-kicker">Clinical summary</span>
+          <h3>{html.escape(ctx['primary_issue'])}</h3>
+          <p class="clinical-summary-text">{html.escape(_short_board_text(ctx['presenting'], limit=420))}</p>
+          <div class="summary-section-grid">
+            <div class="summary-section">
+              <h4>Key findings</h4>
+              {_render_html_list(ctx['critical'] + ctx['results'], 'No decision-critical findings documented yet.')}
+            </div>
+            <div class="summary-section">
+              <h4>Recent updates</h4>
+              {_render_html_list(ctx['updates'], 'No recent treatment, medication, or workup updates documented yet.')}
+            </div>
+            <div class="summary-section">
+              <h4>Outstanding issues</h4>
+              {_render_html_list(ctx['red_flags'] or [ctx['objective']], 'No urgent issues extracted from the current chart context.')}
+            </div>
+            <div class="summary-section">
+              <h4>Missing information</h4>
+              {_render_html_list(ctx['missing'], 'No major gaps detected from available chart fields.')}
+            </div>
+          </div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_board_case_nav(idx: int, queue_len: int, mode_key: str) -> None:
+    prev_col, count_col, next_col = st.columns([0.5, 1.2, 0.5])
+    with prev_col:
+        if st.button("Previous patient", disabled=idx <= 0, use_container_width=True, key=f"board_prev_{mode_key}"):
+            set_active_index(idx - 1)
+            st.rerun()
+    with count_col:
+        st.markdown(
+            f"<p style='text-align:center; color:#65748b; margin:0.55rem 0 0;'>Viewing case <strong>{idx + 1}</strong> of <strong>{queue_len}</strong></p>",
+            unsafe_allow_html=True,
+        )
+    with next_col:
+        if st.button("Next patient", disabled=idx >= queue_len - 1, use_container_width=True, key=f"board_next_{mode_key}"):
+            set_active_index(idx + 1)
+            st.rerun()
+
+
+def _render_patient_flow_panel(df: pd.DataFrame, patient_id: str | None, *, mode: str) -> None:
+    if mode == "prep":
+        with st.expander("Add patients to board", expanded=not st.session_state["board_queue"]):
+            label_to_id = {patient_profile_label(row): str(row["patient_id"]) for _, row in df.iterrows()}
+            on_board = set(st.session_state["board_queue"])
+            available = [label for label, pid in label_to_id.items() if pid not in on_board]
+            picked = st.multiselect(
+                "Select patients",
+                available,
+                placeholder="Choose cases for this board...",
+                key="board_add_multiselect_prep_tabs",
+            )
+            if st.button("Add to board", type="primary", disabled=not picked, use_container_width=True, key="board_add_cases_prep_tabs"):
+                added = add_patients_to_board([label_to_id[label] for label in picked])
+                if added:
+                    st.session_state.pop("board_add_multiselect_prep_tabs", None)
+                st.rerun()
+
+    queue = st.session_state["board_queue"]
+    board_cases = []
+    for pid in queue:
+        case_row = row_for_patient_id(df, pid)
+        if case_row is None:
+            continue
+        status = normalize_board_status(st.session_state["board_status"].get(pid, "Ready for board"))
+        board_cases.append(
+            {
+                "id": pid,
+                "title": f"{pid} - {str(case_row['diagnosis'])[:34]}",
+                "status": status,
+                "status_class": re.sub(r"[^a-z0-9]", "", status.lower()),
+            }
+        )
+    if not board_cases:
+        return
+    queue_event = board_queue_sorter(
+        board_cases,
+        active_id=patient_id or "",
+        key=f"board_queue_sorter_{mode}_{get_meeting_date()}",
+    )
+    if queue_event and queue_event.get("event"):
+        if queue_event["event"] == "reorder" and mode == "prep":
+            new_order = [pid for pid in queue_event.get("order", []) if pid in queue]
+            if new_order and new_order != queue:
+                reorder_board_queue(new_order)
+                st.rerun()
+        elif queue_event["event"] == "select":
+            selected = str(queue_event.get("selected", ""))
+            if selected in queue and selected != patient_id:
+                set_active_index(queue.index(selected))
+                st.rerun()
+
+
+def _render_case_status_control(patient_id: str, mode: str) -> None:
+    current_status = normalize_board_status(st.session_state["board_status"].get(patient_id, "Ready for board"))
+    status_index = list(BOARD_STATUSES).index(current_status) if current_status in BOARD_STATUSES else 0
+    new_status = st.selectbox(
+        "Case status",
+        BOARD_STATUSES,
+        index=status_index,
+        key=f"board_status_{mode}_{patient_id}",
+    )
+    if new_status != current_status:
+        set_status(patient_id, new_status)
+        log_audit_event("board_status", patient_id=patient_id, detail=new_status)
+        st.rerun()
+
+
+def _question_lines(value: str) -> list[str]:
+    lines: list[str] = []
+    for raw in str(value or "").splitlines():
+        item = raw.strip().lstrip("-*").strip()
+        if item and item not in lines:
+            lines.append(item)
+    return lines
+
+
+def _save_question_lines(patient_id: str, questions: list[str]) -> None:
+    update_case_notes(patient_id, discussion_question="\n".join(q.strip() for q in questions if q.strip()))
+
+
+def _render_discussion_questions_panel(patient_id: str, *, mode: str) -> None:
+    current = st.session_state["board_questions"].get(patient_id, "")
+    questions = _question_lines(current)
+    title = "Discussion question builder" if mode == "prep" else "Discussion questions"
+    helper = (
+        "Add the exact questions doctors should resolve during the board."
+        if mode == "prep"
+        else "Use these questions to keep the live discussion focused. Add new questions if they come up."
+    )
+    st.markdown(
+        f"<div class='board-section'><h3>{html.escape(title)}</h3><p>{html.escape(helper)}</p></div>",
+        unsafe_allow_html=True,
+    )
+
+    if questions:
+        for idx, item in enumerate(questions, start=1):
+            st.markdown(
+                f"<div class='board-question-card'><strong>Q{idx}</strong> {html.escape(item)}</div>",
+                unsafe_allow_html=True,
+            )
+            if st.button("Delete question", key=f"board_question_delete_{mode}_{patient_id}_{idx}"):
+                updated = [q for i, q in enumerate(questions, start=1) if i != idx]
+                _save_question_lines(patient_id, updated)
+                st.rerun()
+            st.markdown("<div class='question-row-spacer'></div>", unsafe_allow_html=True)
+    else:
+        st.markdown("<div class='board-empty-note'>No discussion questions have been added for this case yet.</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='question-builder-form'>", unsafe_allow_html=True)
+    with st.form(key=f"board_question_add_form_{mode}_{patient_id}", clear_on_submit=True):
+        new_question = st.text_input(
+            "New discussion question",
+            placeholder="Add a question for the board...",
+            label_visibility="collapsed",
+        )
+        submitted = st.form_submit_button("Add Question", type="primary", use_container_width=True)
+        if submitted:
+            cleaned = new_question.strip()
+            if cleaned:
+                questions.append(cleaned)
+                _save_question_lines(patient_id, questions)
+                st.rerun()
+            else:
+                st.warning("Enter a question before adding it.")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _render_secondary_board_tools(patient_id: str, row: pd.Series, ollama_ok: bool, *, mode: str) -> None:
+    with st.expander("Secondary tools", expanded=False):
+        if mode == "prep":
+            if st.button("Remove from board", use_container_width=True, key=f"remove_board_{mode}_{patient_id}"):
+                remove_from_board(patient_id)
+                st.rerun()
+        st.markdown("**Full MDT brief**")
+        profile_summary = _profile_summary_for_patient(patient_id, row)
+        if profile_summary:
+            display_summary(profile_summary)
+        if ollama_ok and st.button("Generate MDT brief", type="primary", use_container_width=True, key=f"generate_mdt_{mode}_{patient_id}"):
+            try:
+                patient_data = format_patient_data(row)
+                fingerprint = record_fingerprint(patient_data)
+                summary, from_cache, latency = load_summary(
+                    patient_id,
+                    patient_data,
+                    fingerprint,
+                    st.session_state.get(f"cache_bust_{patient_id}", 0),
+                    force_refresh=True,
+                )
+                st.session_state["summary"] = summary
+                st.session_state["summary_meta"] = {
+                    "patient_id": patient_id,
+                    "fingerprint": fingerprint,
+                    "from_cache": from_cache,
+                    "latency_sec": latency,
+                    "prompt_version": PROMPT_VERSION,
+                }
+                log_audit_event("mdt_brief_generated", patient_id=patient_id, prompt_version=PROMPT_VERSION)
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Brief generation failed: {exc}")
+
+
+def _render_section_heading(title: str, description: str) -> None:
+    st.markdown(
+        f"<div class='board-section'><h3>{html.escape(title)}</h3><p>{html.escape(description)}</p></div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_prep_workspace(df: pd.DataFrame, ollama_ok: bool) -> None:
+    if not st.session_state["board_queue"]:
+        _render_section_heading("Prep workspace", "Start by adding patients to the board, then prepare summaries and discussion questions.")
+        st.markdown("<div class='board-side-panel'>", unsafe_allow_html=True)
+        _render_patient_flow_panel(df, None, mode="prep")
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("<div class='board-empty-note'>No cases are on this board yet. Add patients from the flow manager to start building the meeting.</div>", unsafe_allow_html=True)
+        return
+
+    queue = st.session_state["board_queue"]
+    idx = st.session_state["board_active_idx"]
+    patient_id = get_active_patient_id()
+    row = row_for_patient_id(df, patient_id) if patient_id else None
+    if row is None or patient_id is None:
+        st.warning("Selected case is no longer available.")
+        return
+
+    _render_patient_header(row, patient_id, idx, len(queue), mode="prep")
+    _render_board_case_nav(idx, len(queue), "prep")
+
+    queue_col, main_col = st.columns([0.28, 0.72], gap="large")
+    with queue_col:
+        st.markdown("<div class='board-side-panel'><h4>Patient flow</h4><p>Add cases, reorder the agenda, and switch patients without losing the current prep context.</p>", unsafe_allow_html=True)
+        _render_patient_flow_panel(df, patient_id, mode="prep")
+        st.markdown("</div>", unsafe_allow_html=True)
+        _render_case_status_control(patient_id, "prep")
+        _render_secondary_board_tools(patient_id, row, ollama_ok, mode="prep")
+
+    with main_col:
+        _render_section_heading("Chart summary", "Confirm the clinical picture before preparing questions or enriching missing chart data.")
+        _render_chart_summary_panel(row, patient_id, load_patient_report_link(patient_id))
+
+        st.markdown("<div class='prep-work-grid'>", unsafe_allow_html=True)
+        ai_col, question_col = st.columns([0.48, 0.52], gap="large")
+        with ai_col:
+            _render_section_heading("Prep support", "Draft missing-data prompts and question ideas for this patient.")
+            _render_prep_ai_enrichment(patient_id, row, ollama_ok)
+        with question_col:
+            _render_discussion_questions_panel(patient_id, mode="prep")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _render_meeting_workspace(df: pd.DataFrame, ollama_ok: bool) -> None:
+    if not st.session_state["board_queue"]:
+        _render_section_heading("During Meeting workspace", "Add patients in Prep first so doctors have a focused live agenda.")
+        st.markdown("<div class='board-empty-note'>No cases are ready for this meeting. Add patients in the Prep workflow first.</div>", unsafe_allow_html=True)
+        return
+
+    queue = st.session_state["board_queue"]
+    idx = st.session_state["board_active_idx"]
+    patient_id = get_active_patient_id()
+    row = row_for_patient_id(df, patient_id) if patient_id else None
+    if row is None or patient_id is None:
+        st.warning("Selected case is no longer available.")
+        return
+
+    _render_patient_header(row, patient_id, idx, len(queue), mode="meeting")
+    _render_board_case_nav(idx, len(queue), "meeting")
+
+    queue_col, main_col = st.columns([0.27, 0.73], gap="large")
+    with queue_col:
+        st.markdown("<div class='board-side-panel'><h4>Meeting agenda</h4><p>Select the patient currently being discussed. The selected case drives the summary, notes, and assistant context.</p>", unsafe_allow_html=True)
+        _render_patient_flow_panel(df, patient_id, mode="meeting")
+        st.markdown("</div>", unsafe_allow_html=True)
+        _render_case_status_control(patient_id, "meeting")
+
+    with main_col:
+        _render_section_heading("Chart summary", "Start the discussion with the patient context and decision-critical information.")
+        _render_chart_summary_panel(row, patient_id, load_patient_report_link(patient_id))
+
+        _render_discussion_questions_panel(patient_id, mode="meeting")
+
+        _render_section_heading("Meeting workspace", "Capture the decision and use the assistant as a clinical support tool for this selected patient.")
+        decision_col, assistant_col = st.columns([0.56, 0.44], gap="large")
+        with decision_col:
+            st.markdown("<div class='board-section' style='margin-top:0;'><h3>Meeting notes and decisions</h3></div>", unsafe_allow_html=True)
+            question = st.session_state["board_questions"].get(patient_id, "")
+            recommendation = st.text_area(
+                "MDT decision",
+                value=st.session_state["board_recommendations"].get(patient_id, ""),
+                placeholder="Board decision (plan, treatment path, further workup...)",
+                key=f"board_recommendation_tabs_{patient_id}",
+                height=100,
+            )
+            rationale = st.text_area(
+                "Rationale",
+                value=st.session_state["board_rationale"].get(patient_id, ""),
+                placeholder="Why this decision; key factors from the discussion",
+                key=f"board_rationale_tabs_{patient_id}",
+                height=80,
+            )
+            follow_up = st.text_input(
+                "Follow-up review date",
+                value=st.session_state["board_follow_up"].get(patient_id, ""),
+                placeholder="e.g. 2026-07-15 or 6 weeks",
+                key=f"board_follow_up_tabs_{patient_id}",
+            )
+            action_items = _render_action_items_editor(patient_id)
+            update_case_notes(
+                patient_id,
+                discussion_question=question,
+                recommendation=recommendation,
+                rationale=rationale,
+                follow_up_date=follow_up,
+                action_items=action_items,
+            )
+        with assistant_col:
+            _render_meeting_chat(patient_id, row, ollama_ok)
+            _render_secondary_board_tools(patient_id, row, ollama_ok, mode="meeting")
+
+
 def _format_saved_board_label(summary: dict[str, str | int]) -> str:
     board_key = str(summary["meeting_date"])
     title = str(summary["board_title"]).strip()
@@ -900,6 +2138,7 @@ def render_saved_board_sessions() -> None:
 def page_todays_board(df: pd.DataFrame, ollama_ok: bool) -> None:
     prune_board_queue(df)
     ensure_board_state()
+    _render_board_workspace_styles()
     render_saved_board_sessions()
 
     meta1, meta2, meta3, meta4 = st.columns([1.1, 1.35, 0.55, 0.4])
@@ -922,16 +2161,13 @@ def page_todays_board(df: pd.DataFrame, ollama_ok: bool) -> None:
             persist_meeting()
     with meta3:
         state = get_meeting_state()
-        patient_labels = {
-            str(row["patient_id"]): patient_profile_label(row)
-            for _, row in df.iterrows()
-        }
+        patient_labels = {str(row["patient_id"]): patient_profile_label(row) for _, row in df.iterrows()}
         minutes_pdf = format_meeting_minutes_pdf(state, patient_labels)
         minutes_md = format_meeting_minutes_markdown(state, patient_labels)
         dl_pdf, dl_md = st.columns(2)
         with dl_pdf:
             st.download_button(
-                "📄",
+                "PDF",
                 data=minutes_pdf,
                 file_name=f"board_minutes_{display_meeting_date(get_meeting_date())}.pdf",
                 mime="application/pdf",
@@ -941,7 +2177,7 @@ def page_todays_board(df: pd.DataFrame, ollama_ok: bool) -> None:
             )
         with dl_md:
             st.download_button(
-                "📝",
+                "MD",
                 data=minutes_md,
                 file_name=f"board_minutes_{display_meeting_date(get_meeting_date())}.md",
                 mime="text/markdown",
@@ -951,237 +2187,36 @@ def page_todays_board(df: pd.DataFrame, ollama_ok: bool) -> None:
             )
     with meta4:
         with st.popover("+", use_container_width=True, help="New board"):
-            new_date = st.date_input(
-                "Meeting date",
-                value=date.today(),
-                key="board_new_date_picker",
-            )
-            new_title = st.text_input(
-                "Board title",
-                placeholder="Optional",
-                key="board_new_title_input",
-            )
+            new_date = st.date_input("Meeting date", value=date.today(), key="board_new_date_picker")
+            new_title = st.text_input("Board title", placeholder="Optional", key="board_new_title_input")
             if st.button("Create board", type="primary", use_container_width=True):
                 create_new_board(new_date.isoformat(), new_title.strip())
                 st.rerun()
 
     total, discussed, remaining = board_progress()
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("On board", total)
-    m2.metric("Discussed", discussed)
-    m3.metric("Remaining", remaining)
-    m4.metric("Meeting", display_meeting_date(get_meeting_date()))
+    meeting_date = display_meeting_date(get_meeting_date())
+    st.markdown(
+        f"""
+        <section class="board-page-intro">
+          <span class="board-kicker">Today's Board</span>
+          <h3>Meeting workspace</h3>
+          <p>Move through the board in a clinical order: current patient, chart summary, discussion questions, meeting actions, then AI support.</p>
+          <div class="board-meta-strip">
+            <span>{total} on board</span>
+            <span>{discussed} discussed</span>
+            <span>{remaining} remaining</span>
+            <span>{html.escape(meeting_date)}</span>
+          </div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    with st.expander("Add cases", expanded=not st.session_state["board_queue"]):
-        label_to_id = {
-            patient_profile_label(row): str(row["patient_id"])
-            for _, row in df.iterrows()
-        }
-        on_board = set(st.session_state["board_queue"])
-        available = [label for label, pid in label_to_id.items() if pid not in on_board]
-        picked = st.multiselect(
-            "Select patients",
-            available,
-            placeholder="Choose cases for this board…",
-            key="board_add_multiselect",
-        )
-        if st.button("Add to board", type="primary", disabled=not picked, use_container_width=True):
-            added = add_patients_to_board([label_to_id[label] for label in picked])
-            if added:
-                st.session_state.pop("board_add_multiselect", None)
-            st.rerun()
-
-    if not st.session_state["board_queue"]:
-        return
-
-    queue = st.session_state["board_queue"]
-    idx = st.session_state["board_active_idx"]
-    patient_id = get_active_patient_id()
-    row = row_for_patient_id(df, patient_id) if patient_id else None
-
-    queue_col, case_col = st.columns([0.32, 0.68], gap="large")
-
-    with queue_col:
-        st.markdown('<div class="board-panel">', unsafe_allow_html=True)
-        st.markdown("##### Case list")
-        board_cases = []
-        for pid in queue:
-            case_row = row_for_patient_id(df, pid)
-            if case_row is None:
-                continue
-            status = normalize_board_status(
-                st.session_state["board_status"].get(pid, "Ready for board")
-            )
-            board_cases.append(
-                {
-                    "id": pid,
-                    "title": f"{pid} · {str(case_row['diagnosis'])[:28]}",
-                    "status": status,
-                    "status_class": re.sub(r"[^a-z0-9]", "", status.lower()),
-                }
-            )
-
-        queue_event = board_queue_sorter(
-            board_cases,
-            active_id=patient_id or "",
-            key=f"board_queue_sorter_{get_meeting_date()}",
-        )
-        if queue_event and queue_event.get("event"):
-            if queue_event["event"] == "reorder":
-                new_order = [pid for pid in queue_event.get("order", []) if pid in queue]
-                if new_order and new_order != queue:
-                    reorder_board_queue(new_order)
-                    st.rerun()
-            elif queue_event["event"] == "select":
-                selected = str(queue_event.get("selected", ""))
-                if selected in queue and selected != patient_id:
-                    set_active_index(queue.index(selected))
-                    st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with case_col:
-        if row is None:
-            st.warning("Selected case is no longer available.")
-            return
-
-        prev_col, count_col, next_col = st.columns([0.45, 1.1, 0.45])
-        with prev_col:
-            if st.button(
-                "←",
-                disabled=idx <= 0,
-                use_container_width=True,
-                help="Previous case",
-            ):
-                set_active_index(idx - 1)
-                st.rerun()
-        with count_col:
-            st.markdown(
-                f"<p style='text-align:center; color:#65748b; margin:0.55rem 0 0;'>"
-                f"Case <strong>{idx + 1}</strong> of <strong>{len(queue)}</strong></p>",
-                unsafe_allow_html=True,
-            )
-        with next_col:
-            if st.button(
-                "→",
-                disabled=idx >= len(queue) - 1,
-                use_container_width=True,
-                help="Next case",
-            ):
-                set_active_index(idx + 1)
-                st.rerun()
-
-        report_link = load_patient_report_link(patient_id)
-        profile_summary = _profile_summary_for_patient(patient_id, row)
-        analysis = report_link.analysis if report_link else None
-        report_text = report_link.report_text if report_link else None
-        render_mdt_case_summary(
-            row,
-            profile_summary=profile_summary,
-            analysis=analysis,
-            report_text=report_text,
-        )
-
-        current_status = normalize_board_status(
-            st.session_state["board_status"].get(patient_id, "Ready for board")
-        )
-        status_index = (
-            list(BOARD_STATUSES).index(current_status)
-            if current_status in BOARD_STATUSES
-            else 0
-        )
-        new_status = st.selectbox(
-            "Case status",
-            BOARD_STATUSES,
-            index=status_index,
-            key=f"board_status_{patient_id}",
-        )
-        if new_status != current_status:
-            set_status(patient_id, new_status)
-            log_audit_event("board_status", patient_id=patient_id, detail=new_status)
-            st.rerun()
-
-        with st.expander("Record decision", expanded=True):
-            question = st.text_input(
-                "Discussion question",
-                value=st.session_state["board_questions"].get(patient_id, ""),
-                placeholder="What should the board decide today?",
-                key=f"board_question_{patient_id}",
-            )
-
-            recommendation = st.text_area(
-                "MDT decision",
-                value=st.session_state["board_recommendations"].get(patient_id, ""),
-                placeholder="Board decision (plan, treatment path, further workup…)",
-                key=f"board_recommendation_{patient_id}",
-                height=100,
-            )
-            rationale = st.text_area(
-                "Rationale",
-                value=st.session_state["board_rationale"].get(patient_id, ""),
-                placeholder="Why this decision; key factors from the discussion",
-                key=f"board_rationale_{patient_id}",
-                height=80,
-            )
-            follow_up = st.text_input(
-                "Follow-up review date",
-                value=st.session_state["board_follow_up"].get(patient_id, ""),
-                placeholder="e.g. 2026-07-15 or 6 weeks",
-                key=f"board_follow_up_{patient_id}",
-            )
-
-            action_items = _render_action_items_editor(patient_id)
-            update_case_notes(
-                patient_id,
-                discussion_question=question,
-                recommendation=recommendation,
-                rationale=rationale,
-                follow_up_date=follow_up,
-                action_items=action_items,
-            )
-
-        if report_link:
-            with st.expander(f"PDF briefing — {report_link.report_name}", expanded=False):
-                render_linked_report_summary(report_link, compact=True)
-
-        with st.expander("Chart details", expanded=False):
-            render_patient_overview(row)
-
-        if st.button("Remove from board", use_container_width=True):
-            remove_from_board(patient_id)
-            st.rerun()
-
-        with st.expander("Full MDT brief (profile)", expanded=False):
-            patient_data = format_patient_data(row)
-            fingerprint = record_fingerprint(patient_data)
-            if profile_summary:
-                display_summary(profile_summary)
-            if ollama_ok:
-                if st.button("Generate MDT brief", type="primary", use_container_width=True):
-                    try:
-                        summary, from_cache, latency = load_summary(
-                            patient_id,
-                            patient_data,
-                            fingerprint,
-                            st.session_state.get(f"cache_bust_{patient_id}", 0),
-                            force_refresh=True,
-                        )
-                        st.session_state["summary"] = summary
-                        st.session_state["summary_meta"] = {
-                            "patient_id": patient_id,
-                            "fingerprint": fingerprint,
-                            "from_cache": from_cache,
-                            "latency_sec": latency,
-                            "prompt_version": PROMPT_VERSION,
-                        }
-                        log_audit_event(
-                            "mdt_brief_generated",
-                            patient_id=patient_id,
-                            prompt_version=PROMPT_VERSION,
-                        )
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(f"Brief generation failed: {exc}")
-
+    workflow = _render_workflow_switcher()
+    if workflow == "Prep":
+        _render_prep_workspace(df, ollama_ok)
+    else:
+        _render_meeting_workspace(df, ollama_ok)
 
 def page_home(df: pd.DataFrame) -> None:
     custom_count = int((df.get("source", "") == "custom").sum()) if "source" in df else 0

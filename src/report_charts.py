@@ -220,6 +220,42 @@ def extract_history_durations(report_text: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def extract_document_signals(analysis: dict, report_text: str) -> pd.DataFrame:
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for label, values in (
+        ("Critical fact", analysis.get("critical_facts") if isinstance(analysis, dict) else []),
+        ("Red flag", analysis.get("red_flags") if isinstance(analysis, dict) else []),
+        ("Missing data", analysis.get("missing_data") if isinstance(analysis, dict) else []),
+    ):
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            text = " ".join(str(value).split())
+            if not text or text.lower() in {"not specified", "none", "..."}:
+                continue
+            key = text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append({"Signal": label, "Evidence": text})
+            if len(rows) >= 6:
+                return pd.DataFrame(rows)
+
+    text = " ".join(report_text.split())
+    fallback_patterns = [
+        ("Age documented", r"\b\d{1,3}\s*(?:years?|yrs?)\b"),
+        ("Decision capacity", r"[^.]{0,80}(?:capacity|decision|welfare|property)[^.]{0,120}"),
+        ("Cognitive concern", r"[^.]{0,80}(?:remember|memory|dementia|cognitive)[^.]{0,120}"),
+        ("Treatment context", r"[^.]{0,80}(?:medication|treatment|diagnosis)[^.]{0,120}"),
+    ]
+    for label, pattern in fallback_patterns:
+        match = re.search(pattern, text, re.I)
+        if match:
+            rows.append({"Signal": label, "Evidence": " ".join(match.group(0).split())})
+    return pd.DataFrame(rows[:6])
+
+
 def _numeric_measurements(report_text: str) -> pd.DataFrame:
     frames = [extract_vitals_from_text(report_text), extract_labs_from_text(report_text)]
     frames = [frame for frame in frames if not frame.empty]
@@ -431,6 +467,62 @@ def render_measurement_cards(df: pd.DataFrame) -> None:
     )
 
 
+def render_document_signal_cards(df: pd.DataFrame) -> None:
+    if df.empty:
+        st.caption("No structured vitals, labs, timeline events, or document signals were found.")
+        return
+
+    cards = []
+    for row in df.itertuples(index=False):
+        cards.append(
+            (
+                '<div class="document-signal-card">'
+                f'<span>{escape(str(row.Signal))}</span>'
+                f'<p>{escape(str(row.Evidence))}</p>'
+                '</div>'
+            )
+        )
+    st.markdown(
+        dedent(
+            f"""
+        <style>
+          .document-signal-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+            gap: 0.65rem;
+            margin: 0.55rem 0 1rem;
+          }}
+          .document-signal-card {{
+            background: rgba(255,255,255,0.9);
+            border: 1px solid rgba(37,94,126,0.16);
+            border-left: 5px solid #255e7e;
+            border-radius: 10px;
+            padding: 0.82rem 0.9rem;
+            box-shadow: 0 8px 18px rgba(31, 41, 55, 0.06);
+          }}
+          .document-signal-card span {{
+            display: block;
+            color: #44657f;
+            font-size: 0.72rem;
+            font-weight: 800;
+            letter-spacing: 0.03em;
+            text-transform: uppercase;
+            margin-bottom: 0.38rem;
+          }}
+          .document-signal-card p {{
+            margin: 0;
+            color: #172033;
+            font-size: 0.9rem;
+            line-height: 1.45;
+          }}
+        </style>
+        <div class="document-signal-grid">{''.join(cards)}</div>
+        """
+        ).strip(),
+        unsafe_allow_html=True,
+    )
+
+
 def render_report_charts(
     analysis: dict,
     report_text: str,
@@ -443,10 +535,11 @@ def render_report_charts(
     numeric_df = _numeric_measurements(report_text)
     timeline_df = extract_symptom_timeline(report_text)
     history_df = extract_history_durations(report_text)
+    signal_df = extract_document_signals(analysis, report_text)
 
     metric_cols = st.columns(3)
     metric_cols[0].metric("Values found", len(numeric_df))
-    metric_cols[1].metric("Episodes", len(timeline_df))
+    metric_cols[1].metric("Signals", len(timeline_df) + len(history_df) + len(signal_df))
     metric_cols[2].metric(
         "Abnormal",
         int((numeric_df["Status"] == "High").sum()) if not numeric_df.empty else 0,
@@ -457,7 +550,8 @@ def render_report_charts(
     history_chart = chart_history_durations(report_text)
 
     if vitals_chart is None and timeline_chart is None and history_chart is None:
-        st.caption("No numeric values or timelines were found in this report.")
+        st.caption("No structured vitals or labs were found. Showing extracted document signals instead.")
+        render_document_signal_cards(signal_df)
         return
 
     if vitals_chart is not None:
